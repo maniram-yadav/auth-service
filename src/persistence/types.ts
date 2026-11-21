@@ -97,11 +97,99 @@ export interface PasswordResetRepository {
   deleteForUser(userId: string): Promise<void>;
 }
 
+// ------------------------------------------------------------------ subscriptions
+
+export type PlanId = 'six_months' | 'one_year' | 'lifetime';
+export type PaymentProvider = 'google_play' | 'sandbox';
+
+/** The user's current entitlement (one row per user). */
+export interface SubscriptionRecord {
+  userId: string;
+  planId: PlanId;
+  provider: PaymentProvider;
+  /** Store product id of the purchase that granted the entitlement. */
+  productId: string;
+  /** Latest purchase token (used to re-verify renewals with the store). */
+  purchaseToken: string;
+  /** null = lifetime (never expires). */
+  expiresAt: Date | null;
+  autoRenewing: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type SubscriptionUpsert = Omit<SubscriptionRecord, 'createdAt' | 'updatedAt'>;
+
+/** Immutable audit row per verified store purchase. (provider, purchaseToken) is unique. */
+export interface PurchaseRecord {
+  id: string;
+  userId: string;
+  provider: PaymentProvider;
+  purchaseToken: string;
+  productId: string;
+  planId: PlanId;
+  orderId: string | null;
+  purchasedAt: Date;
+  expiresAt: Date | null;
+  createdAt: Date;
+}
+
+export type NewPurchase = Omit<PurchaseRecord, 'id' | 'createdAt'>;
+
+/** Thrown when a purchase token is already recorded (replay / sharing protection). */
+export class DuplicatePurchaseError extends Error {
+  constructor() {
+    super('Purchase token already used');
+    this.name = 'DuplicatePurchaseError';
+  }
+}
+
+export interface SubscriptionRepository {
+  get(userId: string): Promise<SubscriptionRecord | null>;
+  upsert(subscription: SubscriptionUpsert): Promise<SubscriptionRecord>;
+}
+
+export interface PurchaseRepository {
+  findByToken(provider: PaymentProvider, purchaseToken: string): Promise<PurchaseRecord | null>;
+  /** @throws DuplicatePurchaseError */
+  create(purchase: NewPurchase): Promise<PurchaseRecord>;
+}
+
+// ------------------------------------------------------------------ device data sync
+
+/** A call-blocking rule as synced from the app (the app recomputes match digits locally). */
+export interface SyncedRule {
+  type: 'EXACT' | 'PREFIX' | 'SUFFIX' | 'CONTAINS';
+  countryIso: string;
+  anyCountry: boolean;
+  pattern: string;
+  label: string | null;
+  enabled: boolean;
+}
+
+export interface RuleSyncRepository {
+  list(userId: string): Promise<{ rules: SyncedRule[]; updatedAt: Date | null }>;
+  /** Atomically replaces the user's stored rule set. */
+  replace(userId: string, rules: SyncedRule[]): Promise<Date>;
+}
+
+// ------------------------------------------------------------------ tenant settings
+
+/** Small key/value table for tenant-wide settings (e.g. the subscription sync interval). */
+export interface AppSettingsRepository {
+  get<T>(key: string): Promise<T | null>;
+  set(key: string, value: unknown): Promise<void>;
+}
+
 /** All repositories of one tenant. */
 export interface TenantStore {
   users: UserRepository;
   refreshTokens: RefreshTokenRepository;
   passwordResets: PasswordResetRepository;
+  subscriptions: SubscriptionRepository;
+  purchases: PurchaseRepository;
+  rules: RuleSyncRepository;
+  settings: AppSettingsRepository;
 }
 
 /** A database backend. One instance per process. */

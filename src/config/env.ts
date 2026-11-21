@@ -68,6 +68,23 @@ const EnvSchema = z
     TRUST_PROXY: z.coerce.number().int().min(0).max(10).default(0),
     RATE_LIMIT_ENABLED: bool.default(true),
 
+    // ---- Subscriptions ----
+    /** Google Play app id, e.g. com.callblocker.app. Enables the google_play payment provider. */
+    GOOGLE_PLAY_PACKAGE_NAME: z.string().regex(/^[a-zA-Z][\w.]+$/).optional(),
+    /** Path to the Play Console service-account JSON key (or inline via GOOGLE_PLAY_SERVICE_ACCOUNT_JSON). */
+    GOOGLE_PLAY_SERVICE_ACCOUNT_FILE: z.string().optional(),
+    GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: z.string().optional(),
+    /** Accept `sandbox_…` purchase tokens without payment (development/testing only; refused in production). */
+    PAYMENTS_SANDBOX_ENABLED: bool.default(false),
+    PLAN_SIX_MONTHS_PRODUCT_ID: z.string().min(1).default('callblocker_6_months'),
+    PLAN_ONE_YEAR_PRODUCT_ID: z.string().min(1).default('callblocker_1_year'),
+    PLAN_LIFETIME_PRODUCT_ID: z.string().min(1).default('callblocker_lifetime'),
+    /** Used until an admin stores a tenant-specific interval in the database. */
+    SUBSCRIPTION_SYNC_INTERVAL_VALUE: z.coerce.number().int().min(1).max(1000).default(1),
+    SUBSCRIPTION_SYNC_INTERVAL_UNIT: z.enum(['minute', 'hour', 'day', 'month', 'year']).default('hour'),
+    /** SHA-256 hashes of admin keys (header X-Admin-Key). Empty = admin API disabled. */
+    ADMIN_API_KEY_HASHES: csv,
+
     MAIL_TRANSPORT: z.enum(['gmail', 'console', 'memory']).default('console'),
     MAIL_FROM: z.string().optional(),
     APP_NAME: z.string().default('Call Blocker'),
@@ -91,7 +108,20 @@ const EnvSchema = z
         if (!env[key]) ctx.addIssue({ code: 'custom', path: [key], message: `${key} is required when MAIL_TRANSPORT=gmail` });
       }
     }
+    if (env.GOOGLE_PLAY_PACKAGE_NAME && !env.GOOGLE_PLAY_SERVICE_ACCOUNT_FILE && !env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['GOOGLE_PLAY_SERVICE_ACCOUNT_FILE'],
+        message: 'Set GOOGLE_PLAY_SERVICE_ACCOUNT_FILE or GOOGLE_PLAY_SERVICE_ACCOUNT_JSON when GOOGLE_PLAY_PACKAGE_NAME is set',
+      });
+    }
+    if (env.ADMIN_API_KEY_HASHES.some((h) => !/^[a-f0-9]{64}$/.test(h))) {
+      ctx.addIssue({ code: 'custom', path: ['ADMIN_API_KEY_HASHES'], message: 'ADMIN_API_KEY_HASHES must be SHA-256 hex digests' });
+    }
     if (env.NODE_ENV === 'production') {
+      if (env.PAYMENTS_SANDBOX_ENABLED) {
+        ctx.addIssue({ code: 'custom', path: ['PAYMENTS_SANDBOX_ENABLED'], message: 'Sandbox payments are not allowed in production' });
+      }
       if (env.MAIL_TRANSPORT !== 'gmail') {
         ctx.addIssue({ code: 'custom', path: ['MAIL_TRANSPORT'], message: 'Production must use MAIL_TRANSPORT=gmail' });
       }

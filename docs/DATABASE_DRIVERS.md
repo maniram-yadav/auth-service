@@ -2,7 +2,7 @@
 
 `auth-service` stores its data in **MongoDB** or **PostgreSQL**. The backend is chosen with one
 environment flag, `DB_DRIVER`. Both drivers support the same features, security guarantees and
-tenant isolation strategies, and the same 56-test suite runs against each.
+tenant isolation strategies, and the same 78-test suite runs against each.
 
 ---
 
@@ -121,6 +121,25 @@ CREATE TABLE "<schema>"."<t>_password_resets" (
 );  -- + index on expires_at
 ```
 
+Subscription feature tables (same per-tenant naming; see [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)):
+
+```sql
+CREATE TABLE "<t>_subscriptions" (user_id uuid PRIMARY KEY REFERENCES "<t>_users"(id) ON DELETE CASCADE,
+  plan_id varchar(20) CHECK (plan_id IN ('six_months','one_year','lifetime')), provider varchar(20),
+  product_id varchar(200), purchase_token varchar(4096), expires_at timestamptz /* NULL = lifetime */,
+  auto_renewing boolean, created_at timestamptz, updated_at timestamptz);
+CREATE TABLE "<t>_purchases" (id uuid PRIMARY KEY, user_id uuid REFERENCES "<t>_users"(id) ON DELETE CASCADE,
+  provider varchar(20), purchase_token varchar(4096), product_id varchar(200), plan_id varchar(20),
+  order_id varchar(200), purchased_at timestamptz, expires_at timestamptz, created_at timestamptz,
+  UNIQUE (provider, purchase_token));                      -- replay / sharing protection
+CREATE TABLE "<t>_user_rules" (user_id uuid PRIMARY KEY REFERENCES "<t>_users"(id) ON DELETE CASCADE,
+  rules jsonb NOT NULL, updated_at timestamptz);           -- whole rule set, replaced atomically
+CREATE TABLE "<t>_app_settings" (key varchar(100) PRIMARY KEY, value jsonb, updated_at timestamptz);
+  -- e.g. key 'subscription.syncInterval' → {"value":1,"unit":"hour"}
+```
+MongoDB uses the same names as collections, with a unique index on `userId` (subscriptions, user_rules),
+`(provider, purchaseToken)` (purchases) and `key` (app_settings).
+
 Constraint and index names include the tenant-prefixed table name, because PostgreSQL index names must be
 unique within a schema.
 
@@ -212,4 +231,4 @@ npm test
 
 Global test setup starts **both** a real MongoDB (`mongodb-memory-server`) and a real PostgreSQL (PGlite served over
 the Postgres wire protocol, so the production `pg` driver is used). Every suite (auth, security, tenancy and the storage
-contract) runs once per driver: **112 tests, 56 per driver**.
+contract, subscriptions, rule sync) runs once per driver: **156 tests, 78 per driver**.

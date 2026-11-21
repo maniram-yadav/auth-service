@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "tenant:key": "tsx scripts/create-tenant-key.ts",
-    "tenant:migrate": "tsx --env-file-if-exists=.env scripts/migrate-legacy-to-tenant.ts"
+    "tenant:migrate": "tsx --env-file-if-exists=.env scripts/migrate-legacy-to-tenant.ts",
+    "admin:key": "tsx scripts/create-admin-key.ts"
   },
   "dependencies": {
     "argon2": "^0.45.2",

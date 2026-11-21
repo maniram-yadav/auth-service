@@ -7,27 +7,31 @@ import { TENANT_ID_PATTERN } from '../tenancy/tenant.js';
  */
 export type IsolationStrategy = 'collection' | 'database';
 
-const BASE = { users: 'users', refreshTokens: 'refresh_tokens', passwordResets: 'password_resets' } as const;
+const BASE = {
+  users: 'users',
+  refreshTokens: 'refresh_tokens',
+  passwordResets: 'password_resets',
+  subscriptions: 'subscriptions',
+  purchases: 'purchases',
+  userRules: 'user_rules',
+  appSettings: 'app_settings',
+} as const;
 
-export interface PhysicalNames {
+export type LogicalName = keyof typeof BASE;
+
+export type PhysicalNames = {
   /** MongoDB database / PostgreSQL schema, or null for the shared one. */
   namespace: string | null;
-  users: string;
-  refreshTokens: string;
-  passwordResets: string;
-}
+} & Record<LogicalName, string>;
 
 /** Physical collection / table names for a tenant, e.g. "web_portal_users". */
 export function physicalNames(strategy: IsolationStrategy, tenantId: string, prefix: string): PhysicalNames {
   if (!TENANT_ID_PATTERN.test(tenantId)) throw new Error(`Invalid tenant id: ${tenantId}`);
-  return strategy === 'collection'
-    ? {
-        namespace: null,
-        users: `${tenantId}_${BASE.users}`,
-        refreshTokens: `${tenantId}_${BASE.refreshTokens}`,
-        passwordResets: `${tenantId}_${BASE.passwordResets}`,
-      }
-    : { namespace: `${prefix}${tenantId}`, ...BASE };
+  if (strategy === 'database') return { namespace: `${prefix}${tenantId}`, ...BASE };
+  const prefixed = Object.fromEntries(
+    Object.entries(BASE).map(([key, name]) => [key, `${tenantId}_${name}`]),
+  ) as Record<LogicalName, string>;
+  return { namespace: null, ...prefixed };
 }
 
 /** Caches one promise per tenant; failed initialisations are evicted so the next call retries. */

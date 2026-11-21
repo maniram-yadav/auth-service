@@ -16,6 +16,14 @@ import {
   type UserRecord,
   type UserRepository,
 } from '../types.js';
+import {
+  PgAppSettingsRepository,
+  PgPurchaseRepository,
+  PgRuleSyncRepository,
+  PgSubscriptionRepository,
+  accountDdl,
+  type AccountTables,
+} from './account-data.js';
 
 type Queryable = Pick<pg.Pool, 'query'>;
 
@@ -25,7 +33,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ident = (name: string) => `"${name.replace(/"/g, '""')}"`;
 
 /** Fully-qualified, quoted table names of one tenant. */
-interface Tables {
+interface Tables extends AccountTables {
   schema: string;
   users: string;
   refreshTokens: string;
@@ -37,7 +45,17 @@ interface Tables {
 function tablesFor(names: PhysicalNames, sharedSchema: string): Tables {
   const schema = names.namespace ?? sharedSchema;
   const q = (t: string) => `${ident(schema)}.${ident(t)}`;
-  return { schema, users: q(names.users), refreshTokens: q(names.refreshTokens), passwordResets: q(names.passwordResets), raw: names };
+  return {
+    schema,
+    users: q(names.users),
+    refreshTokens: q(names.refreshTokens),
+    passwordResets: q(names.passwordResets),
+    subscriptions: q(names.subscriptions),
+    purchases: q(names.purchases),
+    userRules: q(names.userRules),
+    appSettings: q(names.appSettings),
+    raw: names,
+  };
 }
 
 /**
@@ -413,11 +431,15 @@ export class PgStorageProvider implements StorageProvider {
 
   private async build(tenantId: string): Promise<TenantStore> {
     const t = this.tables(tenantId);
-    await this.runDdl(tenantDdl(t));
+    await this.runDdl([...tenantDdl(t), ...accountDdl(t)]);
     return {
       users: new PgUserRepository(this.pool, t),
       refreshTokens: new PgRefreshTokenRepository(this.pool, t),
       passwordResets: new PgPasswordResetRepository(this.pool, t),
+      subscriptions: new PgSubscriptionRepository(this.pool, t),
+      purchases: new PgPurchaseRepository(this.pool, t),
+      rules: new PgRuleSyncRepository(this.pool, t),
+      settings: new PgAppSettingsRepository(this.pool, t),
     };
   }
 

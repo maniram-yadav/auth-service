@@ -6,6 +6,7 @@ import { loadEnv } from '../src/config/env.js';
 import { createContainer } from '../src/container.js';
 import { createLogger } from '../src/lib/logger.js';
 import { MemoryMailer } from '../src/modules/mail/dev.mailers.js';
+import type { PurchaseVerifier } from '../src/modules/subscriptions/verifiers/verifier.js';
 import type { TestDriver } from './drivers.js';
 import { TEST_KEYS } from './setup-env.js';
 
@@ -16,16 +17,21 @@ export function tenantClient(app: Express, apiKey: string | null) {
   return {
     get: (path: string) => withKey(agent.get(path)),
     post: (path: string) => withKey(agent.post(path)),
+    put: (path: string) => withKey(agent.put(path)),
   };
 }
 
 /** Builds the real Express app on the given database driver with an in-memory mailer. */
-export function buildApp(db: TestDriver, envOverrides: Record<string, string> = {}) {
+export function buildApp(
+  db: TestDriver,
+  envOverrides: Record<string, string> = {},
+  extra: { verifiers?: PurchaseVerifier[] } = {},
+) {
   const env = loadEnv({ ...process.env, ...db.env, ...envOverrides });
   const logger = createLogger(env);
   const mailer = new MemoryMailer();
   const storage = db.storage(env.TENANT_ISOLATION, env.TENANT_DB_PREFIX);
-  const container = createContainer(env, logger, { mailer, storage });
+  const container = createContainer(env, logger, { mailer, storage, ...extra });
   const app = createApp(container);
   return {
     app,

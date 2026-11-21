@@ -10,6 +10,9 @@ import { corsPolicy, createRateLimiters, noStore, requireJsonBody, resolveTenant
 import { createAuthRouter } from './modules/auth/auth.routes.js';
 import type { AuthService } from './modules/auth/auth.service.js';
 import type { TokenService } from './modules/auth/token.service.js';
+import { createAdminRouter, createSubscriptionRouter } from './modules/subscriptions/subscription.routes.js';
+import type { SubscriptionService } from './modules/subscriptions/subscription.service.js';
+import { createRuleSyncRouter } from './modules/sync/rules-sync.js';
 import type { StorageProvider } from './persistence/types.js';
 import type { TenantRegistry } from './tenancy/tenant-registry.js';
 
@@ -20,11 +23,12 @@ export interface AppDeps {
   tokens: TokenService;
   tenants: TenantRegistry;
   storage: StorageProvider;
+  subscriptions: SubscriptionService;
 }
 
 const REQUEST_ID = /^[\w-]{8,64}$/;
 
-export function createApp({ env, logger, auth, tokens, tenants, storage }: AppDeps): Express {
+export function createApp({ env, logger, auth, tokens, tenants, storage, subscriptions }: AppDeps): Express {
   const app = express();
   const limits = createRateLimiters(env);
 
@@ -60,8 +64,16 @@ export function createApp({ env, logger, auth, tokens, tenants, storage }: AppDe
   });
 
   // Tenant first: unknown clients are rejected before their body is even parsed.
-  app.use('/api', noStore, resolveTenant(tenants), requireJsonBody, express.json({ limit: '10kb', strict: true }));
+  // Small bodies everywhere; rule sync uploads up to 2000 rules, so it gets a larger (still bounded) limit.
+  const smallJson = express.json({ limit: '10kb', strict: true });
+  const syncJson = express.json({ limit: '512kb', strict: true });
+  app.use('/api', noStore, resolveTenant(tenants), requireJsonBody, (req, res, next) =>
+    (req.path.startsWith('/v1/sync/') ? syncJson : smallJson)(req, res, next),
+  );
   app.use('/api/v1/auth', createAuthRouter(auth, tokens, limits));
+  app.use('/api/v1/subscriptions', createSubscriptionRouter(subscriptions, tokens));
+  app.use('/api/v1/sync', createRuleSyncRouter(tokens));
+  app.use('/api/v1/admin', createAdminRouter(subscriptions, env.ADMIN_API_KEY_HASHES));
 
   app.use(notFound);
   app.use(errorHandler(logger, env.NODE_ENV === 'development'));

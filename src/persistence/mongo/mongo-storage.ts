@@ -15,6 +15,16 @@ import {
   type UserRepository,
 } from '../types.js';
 import {
+  MongoAppSettingsRepository,
+  MongoPurchaseRepository,
+  MongoRuleSyncRepository,
+  MongoSubscriptionRepository,
+  purchaseSchema,
+  ruleSetSchema,
+  settingSchema,
+  subscriptionSchema,
+} from './account-data.js';
+import {
   passwordResetSchema,
   refreshTokenSchema,
   userSchema,
@@ -247,18 +257,28 @@ export class MongoStorageProvider implements StorageProvider {
     const conn = names.namespace ? this.connection.useDb(names.namespace, { useCache: true }) : this.connection;
     // Model names must be unique per connection; prefix them on the shared connection.
     const modelName = (base: string) => (names.namespace ? base : `${tenantId}:${base}`);
-    const bind = <T>(base: string, schema: mongoose.Schema<T>, collection: string): Model<T> =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bind = <T>(base: string, schema: mongoose.Schema<T, any, any, any>, collection: string): Model<T> =>
       (conn.models[modelName(base)] as Model<T> | undefined) ?? conn.model<T>(modelName(base), schema, collection);
 
     const users = bind('User', userSchema, names.users);
     const tokens = bind('RefreshToken', refreshTokenSchema, names.refreshTokens);
     const resets = bind('PasswordReset', passwordResetSchema, names.passwordResets);
-    await Promise.all([users.init(), tokens.init(), resets.init()]); // unique + TTL indexes
+    const subscriptions = bind('Subscription', subscriptionSchema, names.subscriptions);
+    const purchases = bind('Purchase', purchaseSchema, names.purchases);
+    const ruleSets = bind('UserRules', ruleSetSchema, names.userRules);
+    const settings = bind('AppSetting', settingSchema, names.appSettings);
+    // Creates unique + TTL indexes (and the collections) once per tenant.
+    await Promise.all([users, tokens, resets, subscriptions, purchases, ruleSets, settings].map((m) => m.init()));
 
     return {
       users: new MongoUserRepository(users),
       refreshTokens: new MongoRefreshTokenRepository(tokens),
       passwordResets: new MongoPasswordResetRepository(resets),
+      subscriptions: new MongoSubscriptionRepository(subscriptions),
+      purchases: new MongoPurchaseRepository(purchases),
+      rules: new MongoRuleSyncRepository(ruleSets),
+      settings: new MongoAppSettingsRepository(settings),
     };
   }
 }

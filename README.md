@@ -14,6 +14,10 @@ reset codes live in their own collections/tables (`<tenant>_users`, …) or, opt
 database (MongoDB) or schema (PostgreSQL).
 Full design, security analysis and runbooks: [docs/MULTI_TENANCY.md](docs/MULTI_TENANCY.md).
 
+**Subscriptions:** 6 months $10 / 1 year $15 / Lifetime $20 via Google Play, verified server-side; entitlement status
+with a per-tenant sync interval (stored in the database, set by an admin API); rule backup/sync for the app.
+Details: [docs/SUBSCRIPTIONS.md](docs/SUBSCRIPTIONS.md).
+
 ## Quick start
 
 ```bash
@@ -25,7 +29,7 @@ npm run dev                       # needs MongoDB (MONGODB_URI) or PostgreSQL (D
 # or the full stack (pick the profile that matches DB_DRIVER):
 docker compose --profile mongodb up --build
 docker compose --profile postgres up --build
-npm test                          # 112 end-to-end tests: every suite on real MongoDB AND real PostgreSQL
+npm test                          # 156 end-to-end tests: every suite on real MongoDB AND real PostgreSQL
 npm run build && npm start        # production build
 ```
 
@@ -47,6 +51,16 @@ An unknown key returns `401`. A tenant mismatch, a disabled tenant, or a browser
 | POST | `/forgot-password` | `email` | `202` (always, even for unknown emails) |
 | POST | `/reset-password` | `email, code, newPassword, confirmPassword` | `200` |
 | POST | `/change-password` | `currentPassword, newPassword, confirmPassword` (Bearer) | `200 { tokens }` |
+
+Subscriptions & sync (see [docs/SUBSCRIPTIONS.md](docs/SUBSCRIPTIONS.md)):
+
+| Method | Path | Body | Success |
+|---|---|---|---|
+| GET | `/api/v1/subscriptions/plans` | — | `200 { plans, providers }` |
+| GET | `/api/v1/subscriptions/me` | — (Bearer) | `200 { subscription, sync: { interval, intervalSeconds }, accountToken, serverTime }` |
+| POST | `/api/v1/subscriptions/purchase` | `planId, provider, purchaseToken` (Bearer) | `200` same as `/me` |
+| GET/POST | `/api/v1/sync/rules` | `mode: merge\|replace, rules[]` (Bearer) | `200 { rules, updatedAt }` |
+| GET/PUT | `/api/v1/admin/subscription-sync-interval` | `{ value, unit: minute\|hour\|day\|month\|year }` (`X-Admin-Key`) | `200 { interval, intervalSeconds }` |
 
 `country` is an ISO code (`"US"`). `phone` can be national (`"(415) 555-0123"`) or international
 (`"+14155550123"`); it is stored as E.164. Passwords must be **at least 8 characters**
@@ -130,6 +144,8 @@ src/middleware/                    validation, tenant resolution, auth, rate lim
 src/modules/auth/                  schemas, AuthService (use-cases), TokenService, PasswordService
 src/modules/mail/                  Mailer port, GmailMailer (OAuth2), console/memory mailers, templates
 src/modules/users/user.ts          public user shape
+src/modules/subscriptions/         plans, sync interval, SubscriptionService, Google Play + sandbox verifiers, routes
+src/modules/sync/                  rule backup/sync API (merge / replace)
 src/persistence/types.ts           repository + StorageProvider ports (storage-agnostic)
 src/persistence/mongo/             MongoDB implementation (Mongoose, per-tenant models, TTL indexes)
 src/persistence/postgres/          PostgreSQL implementation (node-postgres, per-tenant DDL, SQL repositories)
@@ -138,5 +154,6 @@ src/tenancy/                       tenant config loader, registry (API key → t
 scripts/                           tenant:key (onboarding), tenant:migrate (legacy Mongo data → tenant)
 docs/MULTI_TENANCY.md              multi-tenancy design & implementation plan
 docs/DATABASE_DRIVERS.md           MongoDB vs PostgreSQL setup, schema, parity, operations
+docs/SUBSCRIPTIONS.md              plans, purchase verification, sync interval, rule sync, Play Console setup
 tests/                             supertest suites run on both drivers + storage contract tests
 ```
