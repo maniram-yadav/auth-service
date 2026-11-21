@@ -1,6 +1,5 @@
 import express, { type Express } from 'express';
 import helmet from 'helmet';
-import mongoose from 'mongoose';
 import type { Logger } from 'pino';
 import { pinoHttp } from 'pino-http';
 
@@ -11,6 +10,7 @@ import { corsPolicy, createRateLimiters, noStore, requireJsonBody, resolveTenant
 import { createAuthRouter } from './modules/auth/auth.routes.js';
 import type { AuthService } from './modules/auth/auth.service.js';
 import type { TokenService } from './modules/auth/token.service.js';
+import type { StorageProvider } from './persistence/types.js';
 import type { TenantRegistry } from './tenancy/tenant-registry.js';
 
 export interface AppDeps {
@@ -19,11 +19,12 @@ export interface AppDeps {
   auth: AuthService;
   tokens: TokenService;
   tenants: TenantRegistry;
+  storage: StorageProvider;
 }
 
 const REQUEST_ID = /^[\w-]{8,64}$/;
 
-export function createApp({ env, logger, auth, tokens, tenants }: AppDeps): Express {
+export function createApp({ env, logger, auth, tokens, tenants, storage }: AppDeps): Express {
   const app = express();
   const limits = createRateLimiters(env);
 
@@ -51,9 +52,11 @@ export function createApp({ env, logger, auth, tokens, tenants }: AppDeps): Expr
   app.get('/health/live', (_req, res) => {
     res.json({ status: 'ok' });
   });
-  app.get('/health/ready', (_req, res) => {
-    const ready = mongoose.connection.readyState === mongoose.ConnectionStates.connected;
-    res.status(ready ? 200 : 503).json({ status: ready ? 'ok' : 'unavailable', database: ready ? 'up' : 'down' });
+  app.get('/health/ready', async (_req, res) => {
+    const ready = await storage.isHealthy();
+    res
+      .status(ready ? 200 : 503)
+      .json({ status: ready ? 'ok' : 'unavailable', database: ready ? 'up' : 'down', driver: storage.driver });
   });
 
   // Tenant first: unknown clients are rejected before their body is even parsed.

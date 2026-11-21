@@ -1,7 +1,6 @@
 import { createApp } from './app.js';
 import { loadEnv } from './config/env.js';
 import { createContainer } from './container.js';
-import { connectMongo, disconnectMongo } from './db/mongo.js';
 import { createLogger } from './lib/logger.js';
 
 async function main() {
@@ -9,11 +8,11 @@ async function main() {
   const logger = createLogger(env);
   const container = createContainer(env, logger);
 
-  await connectMongo(env.MONGODB_URI, logger);
+  await container.storage.connect();
   // Create every tenant's collections and indexes up front (they are otherwise created lazily).
   await Promise.all(container.tenants.list().map((t) => container.tenants.context(t)));
   logger.info(
-    { tenants: container.tenants.list().map((t) => t.id), isolation: env.TENANT_ISOLATION },
+    { tenants: container.tenants.list().map((t) => t.id), driver: env.DB_DRIVER, isolation: env.TENANT_ISOLATION },
     'tenants ready',
   );
   container.mailer.verify().then(
@@ -29,7 +28,7 @@ async function main() {
   const shutdown = (signal: string) => {
     logger.info({ signal }, 'shutting down');
     server.close(async () => {
-      await disconnectMongo();
+      await container.storage.disconnect();
       process.exit(0);
     });
     setTimeout(() => process.exit(1), 10_000).unref();

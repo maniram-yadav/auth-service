@@ -11,7 +11,7 @@
 import mongoose from 'mongoose';
 
 import { TENANT_ID_PATTERN } from '../src/tenancy/tenant.js';
-import { physicalNames } from '../src/tenancy/tenant-models.js';
+import { physicalNames } from '../src/persistence/naming.js';
 
 const [tenantId, flag] = process.argv.slice(2);
 const apply = flag === '--apply';

@@ -1,14 +1,14 @@
-import mongoose, { type Types } from 'mongoose';
 import type { Logger } from 'pino';
 
 import type { Env } from '../../config/env.js';
 import { hmacSha256, numericCode, safeEqual } from '../../lib/crypto.js';
 import { AppError, type ErrorDetail } from '../../lib/errors.js';
 import { maskEmail } from '../../lib/phone.js';
+import { DuplicateKeyError } from '../../persistence/types.js';
 import type { TenantContext } from '../../tenancy/tenant-registry.js';
 import type { Mailer, MailMessage } from '../mail/mailer.js';
 import { passwordChangedEmail, passwordResetCodeEmail } from '../mail/templates.js';
-import { toPublicUser, type PublicUser } from '../users/user.model.js';
+import { toPublicUser, type PublicUser } from '../users/user.js';
 import type { ChangePasswordInput, LoginInput, RegisterInput, ResetPasswordInput } from './auth.schemas.js';
 import type { PasswordService } from './password.service.js';
 import type { ClientContext, TokenPair, TokenService } from './token.service.js';
@@ -39,14 +39,15 @@ export interface AuthServiceDeps {
 
 const INVALID_CREDENTIALS = 'Invalid credentials';
 const INVALID_RESET_CODE = 'Invalid or expired reset code';
-
-const isDuplicateKeyError = (e: unknown): e is { code: number; keyPattern?: Record<string, unknown> } =>
-  typeof e === 'object' && e !== null && (e as { code?: unknown }).code === 11000;
+const DUPLICATE_MESSAGE = {
+  email: 'This email is already registered',
+  phone: 'This phone number is already registered',
+} as const;
 
 /**
  * Registration, login, token refresh and password reset use-cases.
- * Every method receives the request's TenantContext and only touches that tenant's
- * collections, so accounts, sessions and reset codes never cross tenant boundaries.
+ * Storage-agnostic: it only uses the tenant's repositories (MongoDB or PostgreSQL), so accounts,
+ * sessions and reset codes never cross tenant boundaries.
  */
 export class AuthService {
   constructor(private readonly deps: AuthServiceDeps) {}
@@ -54,9 +55,12 @@ export class AuthService {
   // ---------------------------------------------------------------- registration
 
   async register(tenant: TenantContext, input: RegisterInput, ctx: ClientContext): Promise<AuthResult> {
-    const { users } = tenant.models;
-    const conflicts = await this.findConflicts(tenant, input.email, input.phone);
-    if (conflicts.length) throw AppError.conflict('An account with these details already exists', conflicts);
+    const { users } = tenant.store;
+    const conflicts = await users.findConflicts(input.email, input.phone);
+    const details: ErrorDetail[] = [];
+    if (conflicts.email) details.push({ field: 'email', message: DUPLICATE_MESSAGE.email });
+    if (conflicts.phone) details.push({ field: 'phone', message: DUPLICATE_MESSAGE.phone });
+    if (details.length) throw AppError.conflict('An account with these details already exists', details);
 
     const passwordHash = await this.deps.passwords.hash(input.password);
     let user;
@@ -69,35 +73,25 @@ export class AuthService {
         passwordHash,
       });
     } catch (e) {
-      // Two concurrent registrations can pass the pre-check; the unique index is the real guard.
-      if (isDuplicateKeyError(e)) {
-        const field = Object.keys(e.keyPattern ?? {})[0] ?? 'email';
+      // Two concurrent registrations can pass the pre-check; the unique constraint is the real guard.
+      if (e instanceof DuplicateKeyError) {
         throw AppError.conflict('An account with these details already exists', [
-          { field, message: `This ${field} is already registered` },
+          { field: e.field, message: DUPLICATE_MESSAGE[e.field] },
         ]);
       }
       throw e;
     }
 
     this.deps.logger.info({ tenant: tenant.id, userId: user.id, email: maskEmail(user.email) }, 'user registered');
-    const tokens = await this.deps.tokens.issue(tenant, user._id, user.tokenVersion, ctx);
+    const tokens = await this.deps.tokens.issue(tenant, user.id, user.tokenVersion, ctx);
     return { user: toPublicUser(tenant.id, user), tokens };
-  }
-
-  private async findConflicts(tenant: TenantContext, email: string, phone: string): Promise<ErrorDetail[]> {
-    const existing = await tenant.models.users.find({ $or: [{ email }, { phone }] }, { email: 1, phone: 1 }).lean();
-    const details: ErrorDetail[] = [];
-    if (existing.some((u) => u.email === email)) details.push({ field: 'email', message: 'This email is already registered' });
-    if (existing.some((u) => u.phone === phone)) details.push({ field: 'phone', message: 'This phone number is already registered' });
-    return details;
   }
 
   // ---------------------------------------------------------------- login
 
   async login(tenant: TenantContext, input: LoginInput, ctx: ClientContext): Promise<AuthResult> {
-    const { users } = tenant.models;
-    const filter = input.kind === 'email' ? { email: input.email } : { phone: input.phone };
-    const user = await users.findOne(filter).select('+passwordHash');
+    const { users } = tenant.store;
+    const user = input.kind === 'email' ? await users.findByEmail(input.email) : await users.findByPhone(input.phone);
 
     if (!user) {
       await this.deps.passwords.verifyDummy(input.password);
@@ -108,46 +102,33 @@ export class AuthService {
       throw new AppError(423, 'ACCOUNT_LOCKED', 'Too many failed sign-in attempts. Try again later or reset your password.');
     }
 
-    const valid = await this.deps.passwords.verify(user.passwordHash, input.password);
-    if (!valid) {
-      await this.recordFailedLogin(tenant, user._id);
+    if (!(await this.deps.passwords.verify(user.passwordHash, input.password))) {
+      const { LOGIN_MAX_FAILED_ATTEMPTS, LOGIN_LOCK_MINUTES } = this.deps.config;
+      const locked = await users.recordFailedLogin(
+        user.id,
+        LOGIN_MAX_FAILED_ATTEMPTS,
+        new Date(Date.now() + LOGIN_LOCK_MINUTES * 60_000),
+      );
+      if (locked) this.deps.logger.warn({ tenant: tenant.id, userId: user.id }, 'account temporarily locked after failed logins');
       throw AppError.unauthorized(INVALID_CREDENTIALS, 'INVALID_CREDENTIALS');
     }
 
-    const update: Record<string, unknown> = { failedLoginAttempts: 0, lockUntil: null, lastLoginAt: new Date() };
-    if (this.deps.passwords.needsRehash(user.passwordHash)) {
-      update.passwordHash = await this.deps.passwords.hash(input.password);
-    }
-    await users.updateOne({ _id: user._id }, { $set: update });
+    const upgraded = this.deps.passwords.needsRehash(user.passwordHash)
+      ? await this.deps.passwords.hash(input.password)
+      : undefined;
+    await users.recordSuccessfulLogin(user.id, upgraded);
 
-    const tokens = await this.deps.tokens.issue(tenant, user._id, user.tokenVersion, ctx);
+    const tokens = await this.deps.tokens.issue(tenant, user.id, user.tokenVersion, ctx);
     return { user: toPublicUser(tenant.id, user), tokens };
-  }
-
-  private async recordFailedLogin(tenant: TenantContext, userId: Types.ObjectId): Promise<void> {
-    const { users } = tenant.models;
-    const { LOGIN_MAX_FAILED_ATTEMPTS, LOGIN_LOCK_MINUTES } = this.deps.config;
-    const updated = await users.findOneAndUpdate(
-      { _id: userId },
-      { $inc: { failedLoginAttempts: 1 } },
-      { returnDocument: 'after', projection: { failedLoginAttempts: 1 } },
-    );
-    if (updated && updated.failedLoginAttempts >= LOGIN_MAX_FAILED_ATTEMPTS) {
-      await users.updateOne(
-        { _id: userId },
-        { $set: { failedLoginAttempts: 0, lockUntil: new Date(Date.now() + LOGIN_LOCK_MINUTES * 60_000) } },
-      );
-      this.deps.logger.warn({ tenant: tenant.id, userId: userId.toString() }, 'account temporarily locked after failed logins');
-    }
   }
 
   // ---------------------------------------------------------------- sessions
 
   async refresh(tenant: TenantContext, refreshToken: string, ctx: ClientContext): Promise<TokenPair> {
     const { userId, family } = await this.deps.tokens.consume(tenant, refreshToken);
-    const user = await tenant.models.users.findById(userId, { tokenVersion: 1 });
-    if (!user) throw AppError.unauthorized('Invalid or expired refresh token', 'INVALID_TOKEN');
-    const tokens = await this.deps.tokens.issue(tenant, user._id, user.tokenVersion, ctx, family);
+    const tokenVersion = await tenant.store.users.getTokenVersion(userId);
+    if (tokenVersion === null) throw AppError.unauthorized('Invalid or expired refresh token', 'INVALID_TOKEN');
+    const tokens = await this.deps.tokens.issue(tenant, userId, tokenVersion, ctx, family);
     await this.deps.tokens.linkReplacement(tenant, refreshToken, tokens.refreshToken);
     return tokens;
   }
@@ -158,12 +139,11 @@ export class AuthService {
 
   /** Signs the user out everywhere: invalidates access tokens and revokes refresh tokens. */
   async logoutAll(tenant: TenantContext, userId: string): Promise<void> {
-    const user = await tenant.models.users.findByIdAndUpdate(userId, { $inc: { tokenVersion: 1 } });
-    if (user) await this.deps.tokens.revokeAllForUser(tenant, user._id);
+    if (await tenant.store.users.bumpTokenVersion(userId)) await this.deps.tokens.revokeAllForUser(tenant, userId);
   }
 
   async me(tenant: TenantContext, userId: string): Promise<PublicUser> {
-    const user = await tenant.models.users.findById(userId);
+    const user = await tenant.store.users.findById(userId);
     if (!user) throw AppError.notFound('User not found');
     return toPublicUser(tenant.id, user);
   }
@@ -180,24 +160,18 @@ export class AuthService {
    * registered, and the mail is sent in the background, so responses can't reveal accounts.
    */
   async forgotPassword(tenant: TenantContext, email: string): Promise<void> {
-    const { users, passwordResets } = tenant.models;
-    const user = await users.findOne({ email }, { fullName: 1, email: 1 });
+    const { users, passwordResets } = tenant.store;
+    const user = await users.findByEmail(email);
     if (!user) return;
 
     const { RESET_CODE_RESEND_COOLDOWN_SECONDS, RESET_CODE_TTL_MINUTES } = this.deps.config;
-    const existing = await passwordResets.findOne({ userId: user._id }, { createdAt: 1 });
-    if (existing && Date.now() - existing.createdAt.getTime() < RESET_CODE_RESEND_COOLDOWN_SECONDS * 1000) {
+    const lastSent = await passwordResets.findCreatedAt(user.id);
+    if (lastSent && Date.now() - lastSent.getTime() < RESET_CODE_RESEND_COOLDOWN_SECONDS * 1000) {
       return; // Recently sent: don't spam the inbox.
     }
 
     const code = numericCode(6);
-    await passwordResets.deleteMany({ userId: user._id });
-    await passwordResets.create({
-      userId: user._id,
-      codeHash: this.codeHash(tenant, code),
-      attempts: 0,
-      expiresAt: new Date(Date.now() + RESET_CODE_TTL_MINUTES * 60_000),
-    });
+    await passwordResets.replace(user.id, this.codeHash(tenant, code), new Date(Date.now() + RESET_CODE_TTL_MINUTES * 60_000));
 
     this.sendInBackground(
       tenant,
@@ -213,26 +187,17 @@ export class AuthService {
   }
 
   async resetPassword(tenant: TenantContext, input: ResetPasswordInput): Promise<void> {
-    const { users, passwordResets } = tenant.models;
+    const { users, passwordResets } = tenant.store;
     const { RESET_CODE_MAX_ATTEMPTS } = this.deps.config;
-    const user = await users.findOne({ email: input.email }).select('+passwordHash');
+    const user = await users.findByEmail(input.email);
     if (!user) throw new AppError(400, 'INVALID_RESET_CODE', INVALID_RESET_CODE);
 
     // Atomically count the attempt first, so parallel guesses can't exceed the limit.
-    const reset = await passwordResets.findOneAndUpdate(
-      {
-        userId: user._id,
-        // Server-built operators; trusted() exempts them from the global sanitizeFilter.
-        expiresAt: mongoose.trusted({ $gt: new Date() }),
-        attempts: mongoose.trusted({ $lt: RESET_CODE_MAX_ATTEMPTS }),
-      },
-      { $inc: { attempts: 1 } },
-      { returnDocument: 'after' },
-    );
-    if (!reset) throw new AppError(400, 'INVALID_RESET_CODE', INVALID_RESET_CODE);
+    const attempt = await passwordResets.consumeAttempt(user.id, new Date(), RESET_CODE_MAX_ATTEMPTS);
+    if (!attempt) throw new AppError(400, 'INVALID_RESET_CODE', INVALID_RESET_CODE);
 
-    if (!safeEqual(this.codeHash(tenant, input.code), reset.codeHash)) {
-      if (reset.attempts >= RESET_CODE_MAX_ATTEMPTS) await passwordResets.deleteOne({ _id: reset._id });
+    if (!safeEqual(this.codeHash(tenant, input.code), attempt.codeHash)) {
+      if (attempt.attempts >= RESET_CODE_MAX_ATTEMPTS) await passwordResets.delete(attempt.id);
       throw new AppError(400, 'INVALID_RESET_CODE', INVALID_RESET_CODE);
     }
 
@@ -242,8 +207,8 @@ export class AuthService {
       ]);
     }
 
-    await this.setPassword(tenant, user._id, input.newPassword);
-    await passwordResets.deleteMany({ userId: user._id });
+    await this.setPassword(tenant, user.id, input.newPassword);
+    await passwordResets.deleteForUser(user.id);
     this.deps.logger.info({ tenant: tenant.id, userId: user.id }, 'password reset completed');
     this.sendInBackground(
       tenant,
@@ -259,7 +224,7 @@ export class AuthService {
     input: ChangePasswordInput,
     ctx: ClientContext,
   ): Promise<TokenPair> {
-    const user = await tenant.models.users.findById(userId).select('+passwordHash');
+    const user = await tenant.store.users.findById(userId);
     if (!user) throw AppError.unauthorized();
     if (!(await this.deps.passwords.verify(user.passwordHash, input.currentPassword))) {
       throw AppError.badRequest('Current password is incorrect', [
@@ -271,28 +236,20 @@ export class AuthService {
         { field: 'newPassword', message: 'New password must be different from the current password' },
       ]);
     }
-    const tokenVersion = await this.setPassword(tenant, user._id, input.newPassword);
+    const tokenVersion = await this.setPassword(tenant, user.id, input.newPassword);
     this.sendInBackground(
       tenant,
       passwordChangedEmail({ to: user.email, name: user.fullName, appName: this.appName(tenant) }),
       'password changed',
     );
-    return this.deps.tokens.issue(tenant, user._id, tokenVersion, ctx);
+    return this.deps.tokens.issue(tenant, user.id, tokenVersion, ctx);
   }
 
   /** Stores a new hash, unlocks the account and invalidates every existing session. */
-  private async setPassword(tenant: TenantContext, userId: Types.ObjectId, password: string): Promise<number> {
-    const passwordHash = await this.deps.passwords.hash(password);
-    const updated = await tenant.models.users.findOneAndUpdate(
-      { _id: userId },
-      {
-        $set: { passwordHash, passwordChangedAt: new Date(), failedLoginAttempts: 0, lockUntil: null },
-        $inc: { tokenVersion: 1 },
-      },
-      { returnDocument: 'after', projection: { tokenVersion: 1 } },
-    );
+  private async setPassword(tenant: TenantContext, userId: string, password: string): Promise<number> {
+    const tokenVersion = await tenant.store.users.setPassword(userId, await this.deps.passwords.hash(password));
     await this.deps.tokens.revokeAllForUser(tenant, userId);
-    return updated?.tokenVersion ?? 0;
+    return tokenVersion;
   }
 
   private appName(tenant: TenantContext): string {

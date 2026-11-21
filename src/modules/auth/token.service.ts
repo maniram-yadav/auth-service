@@ -1,5 +1,4 @@
 import jwt from 'jsonwebtoken';
-import mongoose, { type Types } from 'mongoose';
 
 import type { Env } from '../../config/env.js';
 import { randomToken, sha256, uuid } from '../../lib/crypto.js';
@@ -82,24 +81,24 @@ export class TokenService {
   /** Issues a new token pair. Pass [family] when rotating so reuse detection can revoke it. */
   async issue(
     tenant: TenantContext,
-    userId: Types.ObjectId,
+    userId: string,
     tokenVersion: number,
     ctx: ClientContext,
     family = uuid(),
   ): Promise<TokenPair> {
     const refreshToken = randomToken(48);
     const expiresAt = new Date(Date.now() + this.config.REFRESH_TOKEN_TTL_DAYS * 86_400_000);
-    await tenant.models.refreshTokens.create({
+    await tenant.store.refreshTokens.create({
       userId,
       tokenHash: sha256(refreshToken),
       family,
       expiresAt,
       userAgent: ctx.userAgent?.slice(0, 300) ?? null,
-      ip: ctx.ip ?? null,
+      ip: ctx.ip?.slice(0, 64) ?? null,
     });
     return {
       tokenType: 'Bearer',
-      accessToken: this.signAccessToken(tenant.id, userId.toString(), tokenVersion),
+      accessToken: this.signAccessToken(tenant.id, userId, tokenVersion),
       accessTokenExpiresIn: this.config.ACCESS_TOKEN_TTL_SECONDS,
       refreshToken,
       refreshTokenExpiresAt: expiresAt.toISOString(),
@@ -107,44 +106,30 @@ export class TokenService {
   }
 
   /**
-   * Validates and consumes a refresh token. Returns the owning user id and token family.
+   * Validates and consumes a refresh token (atomically). Returns the owning user id and family.
    * If an already-used token is presented, the whole family is revoked (token theft).
    */
-  async consume(tenant: TenantContext, refreshToken: string): Promise<{ userId: Types.ObjectId; family: string }> {
-    const { refreshTokens } = tenant.models;
+  async consume(tenant: TenantContext, refreshToken: string): Promise<{ userId: string; family: string }> {
+    const { refreshTokens } = tenant.store;
     const tokenHash = sha256(refreshToken);
     const now = new Date();
-    // Atomically mark as used so two concurrent refreshes cannot both succeed.
-    // mongoose.trusted(): our own operator, exempt from the global sanitizeFilter.
-    const record = await refreshTokens.findOneAndUpdate(
-      { tokenHash, revokedAt: null, expiresAt: mongoose.trusted({ $gt: now }) },
-      { $set: { revokedAt: now } },
-      { returnDocument: 'before' },
-    );
-    if (record) return { userId: record.userId, family: record.family };
+    const consumed = await refreshTokens.consumeActive(tokenHash, now);
+    if (consumed) return consumed;
 
-    const reused = await refreshTokens.findOne({ tokenHash });
-    if (reused?.revokedAt) {
-      await refreshTokens.updateMany({ family: reused.family, revokedAt: null }, { $set: { revokedAt: now } });
-    }
+    const reused = await refreshTokens.findByHash(tokenHash);
+    if (reused?.revokedAt) await refreshTokens.revokeFamily(reused.family, now);
     throw AppError.unauthorized('Invalid or expired refresh token', 'INVALID_TOKEN');
   }
 
   async linkReplacement(tenant: TenantContext, oldToken: string, newToken: string): Promise<void> {
-    await tenant.models.refreshTokens.updateOne(
-      { tokenHash: sha256(oldToken) },
-      { $set: { replacedByHash: sha256(newToken) } },
-    );
+    await tenant.store.refreshTokens.linkReplacement(sha256(oldToken), sha256(newToken));
   }
 
   async revoke(tenant: TenantContext, refreshToken: string): Promise<void> {
-    await tenant.models.refreshTokens.updateOne(
-      { tokenHash: sha256(refreshToken), revokedAt: null },
-      { $set: { revokedAt: new Date() } },
-    );
+    await tenant.store.refreshTokens.revoke(sha256(refreshToken), new Date());
   }
 
-  async revokeAllForUser(tenant: TenantContext, userId: Types.ObjectId): Promise<void> {
-    await tenant.models.refreshTokens.updateMany({ userId, revokedAt: null }, { $set: { revokedAt: new Date() } });
+  async revokeAllForUser(tenant: TenantContext, userId: string): Promise<void> {
+    await tenant.store.refreshTokens.revokeAllForUser(userId, new Date());
   }
 }

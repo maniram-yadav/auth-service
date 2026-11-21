@@ -38,8 +38,8 @@ export const requireAuth =
     if (!tenant) throw AppError.unauthorized('Unknown tenant');
     // The token must have been issued for this tenant, and the user must exist in its collection.
     const claims = tokens.verifyAccessToken(token, tenant.id);
-    const user = await tenant.models.users.findById(claims.sub, { tokenVersion: 1 }).lean();
-    if (!user || user.tokenVersion !== claims.tv) {
+    const tokenVersion = await tenant.store.users.getTokenVersion(claims.sub);
+    if (tokenVersion === null || tokenVersion !== claims.tv) {
       throw AppError.unauthorized('Session is no longer valid', 'INVALID_TOKEN');
     }
     req.auth = { userId: claims.sub };

@@ -1,24 +1,31 @@
 # auth-service
 
 User registration, login (email **or** phone + password) and password reset by emailed code.
-Built with Node.js, Express 5, TypeScript, MongoDB (Mongoose) and Gmail sending via OAuth2.
-Backend only; it runs as a separate service next to the Call Blocker app.
+Built with Node.js, Express 5 and TypeScript. It stores data in **MongoDB or PostgreSQL**, chosen with
+`DB_DRIVER`, and sends Gmail via OAuth2. Backend only; it runs as a separate service next to the
+Call Blocker app.
+
+**Database:** set `DB_DRIVER=mongodb` (uses `MONGODB_URI`) or `DB_DRIVER=postgres` (uses `DATABASE_URL`; tables are
+created automatically). Both drivers have identical behaviour and pass the same tests.
+Details: [docs/DATABASE_DRIVERS.md](docs/DATABASE_DRIVERS.md).
 
 **Multi-tenant:** every app or website is a tenant identified by its API key. Each tenant's users, sessions and
-reset codes live in their own collections (`<tenant>_users`, …) or, optionally, their own database.
+reset codes live in their own collections/tables (`<tenant>_users`, …) or, optionally, their own
+database (MongoDB) or schema (PostgreSQL).
 Full design, security analysis and runbooks: [docs/MULTI_TENANCY.md](docs/MULTI_TENANCY.md).
 
 ## Quick start
 
 ```bash
-cp .env.example .env              # set the two secrets; MAIL_TRANSPORT=console prints codes to the log
+cp .env.example .env              # set DB_DRIVER + its URL and the two secrets; MAIL_TRANSPORT=console prints codes
 cp tenants.example.json tenants.json
 npm run tenant:key -- callblocker_android   # put the printed hash in tenants.json, give the key to the app
 npm install
-npm run dev                       # needs MongoDB at MONGODB_URI
-# or the full stack:
-docker compose up --build
-npm test                          # 47 end-to-end tests against a real in-memory MongoDB
+npm run dev                       # needs MongoDB (MONGODB_URI) or PostgreSQL (DATABASE_URL)
+# or the full stack (pick the profile that matches DB_DRIVER):
+docker compose --profile mongodb up --build
+docker compose --profile postgres up --build
+npm test                          # 112 end-to-end tests: every suite on real MongoDB AND real PostgreSQL
 npm run build && npm start        # production build
 ```
 
@@ -98,17 +105,18 @@ registered · `413` body too large · `415` not JSON · `423` account locked · 
   opaque, stored only as SHA-256 hashes, rotated on every use, and **reuse detection** revokes the
   whole token family.
 - **Reset codes**: generated with `crypto.randomInt`, stored only as an HMAC-SHA256 with a server
-  secret, expire automatically (MongoDB TTL index), and allow at most 5 attempts (counted
-  atomically). Responses don't reveal whether an email exists. Resends have a cooldown.
+  secret, expire automatically (MongoDB TTL index, or a scheduled purge in PostgreSQL; expired codes are
+  ignored by every query either way), and allow at most 5 attempts (counted atomically). Responses don't reveal whether an email exists. Resends have a cooldown.
 - **Input**: strict Zod schemas reject unknown fields (no mass assignment) and non-string values.
-  Mongoose `sanitizeFilter` blocks NoSQL operator injection. JSON-only bodies are capped at 10 kB.
+  MongoDB: `sanitizeFilter` blocks operator injection. PostgreSQL: parameterised queries only, and
+  identifiers come from validated tenant ids and are quoted. JSON-only bodies are capped at 10 kB.
 - **HTTP**: Helmet security headers, CORS allow-list, `Cache-Control: no-store` on API responses,
-  `x-powered-by` removed, request IDs, and optional `X-API-Key` for service-to-service calls.
+  `x-powered-by` removed, request IDs, and a per-tenant `X-API-Key` on every API call.
 - **Operations**: configuration is validated at startup (weak or missing secrets refuse to boot;
   production requires Gmail), logs redact passwords, tokens and codes, there are health checks, and
   shutdown is graceful. The Docker image runs as a non-root user.
 - **Tenant isolation**: the tenant is resolved from the hashed API key (never from client claims).
-  There are no global models; every query uses the tenant's own collections. JWTs are bound to the
+  There are no global models; every query uses the tenant's own collections or tables. JWTs are bound to the
   tenant (`tid` + audience), reset codes are tenant-scoped, and browser origins are allow-listed per tenant.
 
 ## Structure
@@ -117,13 +125,18 @@ registered · `413` body too large · `415` not JSON · `423` account locked · 
 src/config/env.ts                  validated configuration
 src/app.ts                         Express app (security middleware, routes, errors)
 src/server.ts                      bootstrap + graceful shutdown
-src/container.ts                   composition root (swap mailer etc.)
-src/middleware/                    validation, auth, API key, rate limits, error handler
-src/modules/auth/                  schemas, AuthService (use-cases), TokenService, PasswordService, models
+src/container.ts                   composition root (storage, mailer, tenants)
+src/middleware/                    validation, tenant resolution, auth, rate limits, error handler
+src/modules/auth/                  schemas, AuthService (use-cases), TokenService, PasswordService
 src/modules/mail/                  Mailer port, GmailMailer (OAuth2), console/memory mailers, templates
-src/modules/users/user.model.ts    User schema (bound per tenant)
-src/tenancy/                       tenant config loader, registry (API key → tenant), per-tenant model factory
-scripts/                           tenant:key (onboarding), tenant:migrate (legacy data → tenant)
+src/modules/users/user.ts          public user shape
+src/persistence/types.ts           repository + StorageProvider ports (storage-agnostic)
+src/persistence/mongo/             MongoDB implementation (Mongoose, per-tenant models, TTL indexes)
+src/persistence/postgres/          PostgreSQL implementation (node-postgres, per-tenant DDL, SQL repositories)
+src/persistence/index.ts           createStorage(): picks the driver from DB_DRIVER
+src/tenancy/                       tenant config loader, registry (API key → tenant)
+scripts/                           tenant:key (onboarding), tenant:migrate (legacy Mongo data → tenant)
 docs/MULTI_TENANCY.md              multi-tenancy design & implementation plan
-tests/                             supertest + mongodb-memory-server end-to-end tests
+docs/DATABASE_DRIVERS.md           MongoDB vs PostgreSQL setup, schema, parity, operations
+tests/                             supertest suites run on both drivers + storage contract tests
 ```

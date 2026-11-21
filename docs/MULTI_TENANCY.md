@@ -1,7 +1,8 @@
 # Multi-Tenancy: Design & Implementation Plan
 
-**Service:** `auth-service` (Node.js · Express 5 · TypeScript · MongoDB/Mongoose)
-**Status:** Implemented. 47 automated tests, including 13 for tenancy, plus a live smoke test against MongoDB.
+**Service:** `auth-service` (Node.js · Express 5 · TypeScript · MongoDB **or** PostgreSQL)
+**Status:** Implemented on both drivers. 112 automated tests (every suite on MongoDB and PostgreSQL), plus live smoke
+tests on both. Database specifics: [DATABASE_DRIVERS.md](DATABASE_DRIVERS.md).
 
 ---
 
@@ -14,7 +15,7 @@ data must be stored **separately**, based on where the request comes from.
 | # | Requirement | How it is met |
 |---|-------------|---------------|
 | T1 | Identify which app or website sent each request | Per-tenant **API key** (`X-API-Key`), resolved server-side |
-| T2 | Store registration and login data in **separate collections per tenant** | `<tenant>_users`, `<tenant>_refresh_tokens`, `<tenant>_password_resets` |
+| T2 | Store registration and login data in **separate collections per tenant** | `<tenant>_users`, `<tenant>_refresh_tokens`, `<tenant>_password_resets` (collections in MongoDB, tables in PostgreSQL) |
 | T3 | The same person can register independently in different tenants | Uniqueness of email and phone is enforced **within** a tenant only |
 | T4 | Credentials, tokens and reset codes must never work across tenants | Tenant-bound JWT (`tid` + audience), tenant collections, tenant-scoped HMAC |
 | T5 | Per-tenant behaviour (allowed browser origins, email branding, enable/disable) | Tenant configuration file |
@@ -56,15 +57,16 @@ data must be stored **separately**, based on where the request comes from.
 | Strategy | Layout | Pros | Cons |
 |----------|--------|------|------|
 | Shared collection + `tenantId` field | `users { tenantId, … }` | Few collections | One missing filter leaks data; doesn't meet "separate collections" (T2) |
-| **Collection per tenant** (default) | `mobile_app_users`, `web_portal_users`, … in one DB | Meets T2; isolation enforced by the model a request is bound to; simple backups | Collection count grows ×3 per tenant |
-| **Database per tenant** (supported) | DB `auth_mobile_app` → `users`, … | Strongest isolation; per-tenant backup, restore and drop; per-DB access control possible | More databases to monitor |
+| **Collection per tenant** (default) | `mobile_app_users`, `web_portal_users`, … in one DB (MongoDB) or schema (PostgreSQL) | Meets T2; isolation enforced by the repository a request is bound to; simple backups | Collection/table count grows ×3 per tenant |
+| **Database per tenant** (supported) | MongoDB DB `auth_mobile_app` → `users`, …; PostgreSQL schema `auth_mobile_app` → `users`, … | Strongest isolation; per-tenant backup, restore and drop; per-DB/schema access control possible | More databases/schemas to monitor |
 
-Both strategies are implemented behind one switch (`TENANT_ISOLATION=collection|database`). The rest
-of the code is identical, because services only ever use `tenant.models.*`.
+Both strategies are implemented behind one switch (`TENANT_ISOLATION=collection|database`) for **both** database
+drivers (`DB_DRIVER=mongodb|postgres`). The rest of the code is identical, because services only ever use
+`tenant.store.*` repositories.
 
-**Why the isolation is structural:** there is **no global `User` model** any more. Schemas are exported,
-and `TenantModelFactory` binds them to a tenant's collection or database. A query can't "forget"
-a tenant filter, because the model itself belongs to one tenant.
+**Why the isolation is structural:** there is **no global user model or table**. `StorageProvider.forTenant(id)`
+returns repositories bound to that tenant's own collections or tables. A query can't "forget" a tenant filter,
+because the repository itself belongs to one tenant.
 
 ### 2.3 Naming
 
@@ -96,15 +98,15 @@ Client (Android app / website / partner server)
 │ → global IP rate limit                                                     │
 │ /health/*  (no tenant)                                                     │
 │ /api → noStore → resolveTenant ──► TenantRegistry (sha256(key) → config)    │
-│                     │                    └─► TenantModelFactory.get(id)    │
-│                     ▼                          (models + indexes, cached)  │
-│        req.tenant = { id, config, models }                                 │
+│                     │                    └─► StorageProvider.forTenant(id) │
+│                     ▼                     (repositories + DDL/indexes, cached)│
+│        req.tenant = { id, config, store }                                  │
 │ → JSON-only → body parser (10 kB) → per-tenant rate limits → Zod validation │
 │ → AuthService(tenant, …) / TokenService(tenant, …) / requireAuth(tenant)    │
 └───────────────────────────────────┬────────────────────────────────────────┘
                                     ▼
-        MongoDB  ─ collection strategy ─  mobile_app_users | web_portal_users | …
-                 ─ database strategy  ─  auth_mobile_app.users | auth_web_portal.users
+   DB_DRIVER=mongodb   collection: mobile_app_users | web_portal_users | …   database: auth_mobile_app.users | …
+   DB_DRIVER=postgres  collection: public.mobile_app_users | …               database: schema auth_mobile_app.users | …
 ```
 
 ### 3.1 Components
@@ -113,7 +115,10 @@ Client (Android app / website / partner server)
 |------|----------------|
 | `src/tenancy/tenant.ts` | `TenantConfig` schema, tenant id rules, `loadTenantConfigs()` (file or inline JSON) |
 | `src/tenancy/tenant-registry.ts` | In-memory index by id and by API-key hash; `context()` builds a `TenantContext` |
-| `src/tenancy/tenant-models.ts` | `TenantModelFactory`: binds schemas to per-tenant collections/DBs, creates indexes once, caches; `physicalNames()` |
+| `src/persistence/types.ts` | Storage-agnostic repository ports and `StorageProvider` |
+| `src/persistence/naming.ts` | `physicalNames()`: collection/table/namespace names for both strategies |
+| `src/persistence/mongo/mongo-storage.ts` | Binds Mongoose schemas to per-tenant collections/DBs, creates indexes once, caches |
+| `src/persistence/postgres/pg-storage.ts` | Creates per-tenant tables or schemas (idempotent DDL under an advisory lock), SQL repositories |
 | `src/middleware/security.ts` | `resolveTenant`, tenant-aware `requireAuth`, tenant-scoped rate-limit keys |
 | `src/modules/auth/auth.service.ts` | Every use case takes `TenantContext` as its first argument |
 | `src/modules/auth/token.service.ts` | Tenant-bound JWTs (`tid` claim, audience `<JWT_AUDIENCE>:<tenant>`), refresh tokens in the tenant collection |
@@ -127,7 +132,7 @@ Client (Android app / website / partner server)
 3. `resolveTenant`: `sha256(key)` maps to `web_portal`. No conflicting `X-Tenant-Id`. Tenant enabled. Origin is in
    `web_portal.allowedOrigins`. Then `req.tenant` is set. The first request for a tenant awaits its index build.
 4. The rate limiter keys on `web_portal|<ip>|<email>`.
-5. `AuthService.login(tenant, …)` queries `tenant.models.users` (`web_portal_users`).
+5. `AuthService.login(tenant, …)` uses `tenant.store.users` (`web_portal_users`, in MongoDB or PostgreSQL).
 6. Tokens: the JWT gets `tid=web_portal` and `aud=call-blocker-app:web_portal`. The refresh token hash is stored in
    `web_portal_refresh_tokens`.
 
@@ -135,13 +140,14 @@ Client (Android app / website / partner server)
 
 ## 4. Data Model (per tenant)
 
-The schemas are unchanged from the single-tenant version. Only their physical location changes.
+The fields are unchanged from the single-tenant version. Only their physical location changes. The PostgreSQL DDL
+is in [DATABASE_DRIVERS.md §4](DATABASE_DRIVERS.md#4-postgresql-schema-per-tenant).
 
 | Collection | Key fields | Indexes |
 |------------|-----------|---------|
 | `<t>_users` | fullName, email, country, phone (E.164), passwordHash (Argon2id), tokenVersion, failedLoginAttempts, lockUntil | unique `email`, unique `phone` (**per tenant**) |
-| `<t>_refresh_tokens` | userId, tokenHash (SHA-256), family, expiresAt, revokedAt, replacedByHash | unique `tokenHash`, `userId`, `family`, TTL on `expiresAt` |
-| `<t>_password_resets` | userId, codeHash (HMAC), attempts, expiresAt | unique `userId`, TTL on `expiresAt` |
+| `<t>_refresh_tokens` | userId, tokenHash (SHA-256), family, expiresAt, revokedAt, replacedByHash | unique `tokenHash`, `userId`, `family`, `expiresAt` (TTL in MongoDB; scheduled purge in PostgreSQL) |
+| `<t>_password_resets` | userId, codeHash (HMAC), attempts, expiresAt | unique `userId`, `expiresAt` (TTL in MongoDB; scheduled purge in PostgreSQL) |
 
 The API now returns `user.tenant` alongside `user.id`.
 
@@ -157,9 +163,9 @@ The API now returns `user.tenant` alongside `user.id`.
 | Access token replayed on another tenant | JWT audience **and** `tid` must equal the request's tenant; user looked up in the tenant collection | `rejects one tenant's access token on another tenant` |
 | Refresh token replayed on another tenant | Lookup only in the tenant's collection; the failed attempt doesn't consume it | `rejects one tenant's refresh token on another tenant` |
 | Reset code from tenant A used on tenant B | HMAC input is `"<tenant>:<code>"`; the reset record lives in the tenant collection | `scopes password reset codes to the tenant…` |
-| Data leak through a forgotten tenant filter | No global models; every model is bound to one tenant | `stores each tenant in its own collections` |
+| Data leak through a forgotten tenant filter | No global models or tables; every repository is bound to one tenant | `stores each tenant in its own collections` (both drivers) |
 | One tenant exhausts another's rate limits | Credential limiter keys include the tenant id | covered by limiter key design |
-| Collection-name injection | Tenant id regex enforced at config load and in the factory | `validates ids, key hashes and duplicates` |
+| Collection/table-name injection | Tenant id regex enforced at config load and in `physicalNames()`; PostgreSQL identifiers are also quoted | `validates ids, key hashes and duplicates` |
 | Leaked config file | Only SHA-256 hashes of keys are stored; `tenants.json` is git-ignored | — |
 
 All earlier controls still apply: Argon2id, lockout, generic errors, refresh rotation with reuse detection,
@@ -175,8 +181,9 @@ All earlier controls still apply: Argon2id, lockout, generic errors, refresh rot
 |----------|---------|-------------|
 | `TENANTS_FILE` | — | Path to `tenants.json` (required unless `TENANTS_JSON` is set) |
 | `TENANTS_JSON` | — | Inline JSON with the same shape; takes precedence |
-| `TENANT_ISOLATION` | `collection` | `collection` or `database` |
-| `TENANT_DB_PREFIX` | `auth_` | Database name prefix for the `database` strategy |
+| `DB_DRIVER` | `mongodb` | `mongodb` or `postgres` (see [DATABASE_DRIVERS.md](DATABASE_DRIVERS.md)) |
+| `TENANT_ISOLATION` | `collection` | `collection` (prefixed collections/tables) or `database` (DB per tenant in MongoDB, schema per tenant in PostgreSQL) |
+| `TENANT_DB_PREFIX` | `auth_` | Database (MongoDB) or schema (PostgreSQL) prefix for the `database` strategy |
 | `CORS_ORIGINS` | — | Extra origins; tenant origins are added automatically |
 | ~~`API_KEYS`~~ | — | **Removed.** Superseded by per-tenant keys |
 
@@ -237,13 +244,14 @@ curl -X POST https://auth.example.com/api/v1/auth/register \
 | Phase | Tasks | Status |
 |-------|-------|--------|
 | **1. Tenant model** | `TenantConfig` schema and loader; id rules; duplicate key/id detection; env vars | ✅ |
-| **2. Data isolation** | Convert global models to exported schemas; `TenantModelFactory` (collection + database strategies, lazy cached index init); `TenantRegistry` | ✅ |
+| **2. Data isolation** | Convert global models to exported schemas; per-tenant storage binding (collection + database strategies, lazy cached index init; later generalised into `StorageProvider`, see phase 9); `TenantRegistry` | ✅ |
 | **3. Request pipeline** | `resolveTenant` (key → tenant, header check, origin check, enabled); CORS union; tenant-aware `requireAuth`; tenant-scoped limiter keys; `req.tenant` typing | ✅ |
 | **4. Use cases** | `AuthService` and `TokenService` take `TenantContext`; tenant-bound JWT; tenant-scoped reset HMAC; per-tenant mail branding (`appName`, `from`) | ✅ |
 | **5. Bootstrap** | Container wires the registry; server pre-creates every tenant's collections and indexes and logs `tenants ready` | ✅ |
 | **6. Tooling** | `npm run tenant:key`, `npm run tenant:migrate` (dry run / `--apply`, refuses to overwrite); `tenants.example.json`; compose mount | ✅ |
 | **7. Tests** | Tenancy suite (resolution, isolation, cross-tenant tokens and codes, database strategy, config validation); existing suites ported | ✅ 47/47 |
 | **8. Verification** | Live run: 2 tenants, same email registered in both, cross-tenant token rejected, foreign origin rejected, 6 physical collections | ✅ |
+| **9. PostgreSQL driver** | Repository ports; Mongo adapter; Postgres adapter (DDL, atomic SQL, purge job); `DB_DRIVER` switch; all suites on both drivers + storage contract tests; live run on Postgres | ✅ 112/112 |
 
 ---
 
@@ -264,11 +272,13 @@ Add the new hash next to the old one, deploy, switch the client to the new key, 
 Set `"enabled": false` and deploy. Requests get 403 and the data is kept. Re-enable at any time.
 
 ### 9.4 Delete a tenant's data
-Collection strategy: drop `<id>_users`, `<id>_refresh_tokens` and `<id>_password_resets`. Database strategy: drop
-`<prefix><id>`. Then remove the tenant entry. Take a backup first.
+Collection strategy: drop `<id>_users`, `<id>_refresh_tokens` and `<id>_password_resets` (collections or tables;
+in PostgreSQL drop `<id>_refresh_tokens` and `<id>_password_resets` before `<id>_users`, or use `CASCADE`). Database
+strategy: drop the database (MongoDB) or `DROP SCHEMA "<prefix><id>" CASCADE` (PostgreSQL). Then remove the tenant
+entry. Take a backup first.
 
-### 9.5 Migrate the existing single-tenant data
-The previous version stored data in `users`, `refreshtokens` and `passwordresets`.
+### 9.5 Migrate the existing single-tenant data (MongoDB only)
+The previous version (MongoDB only) stored data in `users`, `refreshtokens` and `passwordresets`.
 ```bash
 MONGODB_URI=... npm run tenant:migrate -- callblocker_android          # dry run
 MONGODB_URI=... npm run tenant:migrate -- callblocker_android --apply  # rename
@@ -280,16 +290,21 @@ call `/refresh` or sign in again. Refresh tokens keep working.
 ### 9.6 Switch isolation strategy
 Changing `TENANT_ISOLATION` on a deployed system needs a data move: for each tenant, export
 `<id>_*` and import it into `<prefix><id>.*` (or the reverse). Pick the strategy before go-live.
+Changing `DB_DRIVER` likewise points the service at a different, empty store. See
+[DATABASE_DRIVERS.md §7](DATABASE_DRIVERS.md#7-switching-drivers-or-moving-data).
 
 ---
 
 ## 10. Operations & Scaling Notes
 
-- **Collection count:** 3 collections and ~8 indexes per tenant. This is comfortable for hundreds of tenants.
-  For thousands, prefer the `database` strategy or a sharded cluster, and watch WiredTiger file handles.
-- **Index creation:** done at startup for all configured tenants, and lazily, once, for any tenant
-  first seen at runtime. Failures aren't cached, so the next request retries.
-- **Backups:** the `database` strategy lets you back up and restore a single tenant.
+- **Collection count:** 3 collections or tables and ~8 indexes per tenant. This is comfortable for hundreds of tenants.
+  For thousands, prefer the `database` strategy (or sharding on MongoDB), and watch WiredTiger file handles (MongoDB)
+  or catalog size (PostgreSQL).
+- **Index/table creation:** done at startup for all configured tenants, and lazily, once, for any tenant
+  first seen at runtime. Failures aren't cached, so the next request retries. On PostgreSQL the DDL runs in a transaction
+  under an advisory lock, so parallel instances are safe.
+- **Backups:** the `database` strategy lets you back up and restore a single tenant (`mongodump --db` /
+  `pg_dump --schema`).
 - **Observability:** logs include `tenant` for registration, lockout, reset and mail errors. Add a
   `tenant` label to request metrics when a metrics stack is introduced.
 - **Configuration changes:** require a restart (or rolling deploy). This is a deliberate choice for auditability.
@@ -310,6 +325,8 @@ Changing `TENANT_ISOLATION` on a deployed system needs a data move: for each ten
 |-------|-------|
 | `tests/auth.test.ts` | Registration, login (email or phone), lockout, tokens, forgot/reset/change password, within one tenant |
 | `tests/security.test.ts` | Headers, no-store, CORS (env + tenant origins), rate limiting, body limits, config validation |
-| `tests/tenancy.test.ts` | Key resolution, header mismatch, disabled tenants, per-tenant origins, physical collection separation, same email in two tenants, cross-tenant access, refresh and reset rejection, mail branding, database strategy, config validation |
+| `tests/tenancy.test.ts` | Key resolution, header mismatch, disabled tenants, per-tenant origins, physical collection separation, same email in two tenants, cross-tenant access, refresh and reset rejection, mail branding, database/schema strategy, config validation |
+| `tests/storage.test.ts` | Repository contract: CRUD, duplicate mapping, lockout, atomic refresh rotation and reset attempts under concurrency, expiry and purge |
 
-Run `npm test`. Tests use a real MongoDB through `mongodb-memory-server`.
+Run `npm test`. Every suite runs twice: on a real MongoDB (`mongodb-memory-server`) and on a real PostgreSQL
+(PGlite over the wire protocol, using the production `pg` driver). That's 112 tests.

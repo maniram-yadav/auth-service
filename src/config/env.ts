@@ -20,7 +20,19 @@ const EnvSchema = z
     PORT: z.coerce.number().int().min(1).max(65535).default(4000),
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 
-    MONGODB_URI: z.string().min(1, 'MONGODB_URI is required'),
+    /** Storage backend. Both support the same features and tenant isolation strategies. */
+    DB_DRIVER: z.enum(['mongodb', 'postgres']).default('mongodb'),
+    /** Required when DB_DRIVER=mongodb, e.g. mongodb://localhost:27017/auth_service */
+    MONGODB_URI: z.string().optional(),
+    /** Required when DB_DRIVER=postgres, e.g. postgres://user:pass@localhost:5432/auth_service */
+    DATABASE_URL: z.string().optional(),
+    /** Schema holding the tenant-prefixed tables (TENANT_ISOLATION=collection). */
+    PG_SCHEMA: z.string().regex(/^[a-z_][a-z0-9_]{0,30}$/, 'PG_SCHEMA must be a lower-case identifier').default('public'),
+    PG_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+    /** Require TLS with certificate verification (managed databases). */
+    PG_SSL: bool.default(false),
+    /** How often expired refresh tokens / reset codes are deleted (0 = never). */
+    PG_PURGE_INTERVAL_MINUTES: z.coerce.number().int().min(0).max(1440).default(60),
 
     /** HS256 signing secret for access tokens. Generate with: openssl rand -base64 48 */
     JWT_ACCESS_SECRET: z.string().min(32, 'JWT_ACCESS_SECRET must be at least 32 characters'),
@@ -45,9 +57,12 @@ const EnvSchema = z
     TENANTS_FILE: z.string().optional(),
     /** Inline tenants JSON — handy for containers / secret managers. */
     TENANTS_JSON: z.string().optional(),
-    /** "collection": <tenant>_users etc. in one database. "database": one database per tenant. */
+    /**
+     * "collection": <tenant>_users etc. in a shared database (MongoDB) / schema (PostgreSQL).
+     * "database":   one database (MongoDB) / schema (PostgreSQL) per tenant.
+     */
     TENANT_ISOLATION: z.enum(['collection', 'database']).default('collection'),
-    /** Database name prefix for TENANT_ISOLATION=database, e.g. "auth_" → auth_web_shop. */
+    /** Database (MongoDB) / schema (PostgreSQL) prefix for TENANT_ISOLATION=database, e.g. "auth_" → auth_web_shop. */
     TENANT_DB_PREFIX: z.string().regex(/^[a-z0-9_]{0,20}$/).default('auth_'),
     /** Express "trust proxy" setting: number of hops in front of the service (0 = none). */
     TRUST_PROXY: z.coerce.number().int().min(0).max(10).default(0),
@@ -62,6 +77,12 @@ const EnvSchema = z
     GOOGLE_REFRESH_TOKEN: z.string().optional(),
   })
   .superRefine((env, ctx) => {
+    if (env.DB_DRIVER === 'mongodb' && !env.MONGODB_URI) {
+      ctx.addIssue({ code: 'custom', path: ['MONGODB_URI'], message: 'MONGODB_URI is required when DB_DRIVER=mongodb' });
+    }
+    if (env.DB_DRIVER === 'postgres' && !env.DATABASE_URL) {
+      ctx.addIssue({ code: 'custom', path: ['DATABASE_URL'], message: 'DATABASE_URL is required when DB_DRIVER=postgres' });
+    }
     if (!env.TENANTS_FILE && !env.TENANTS_JSON) {
       ctx.addIssue({ code: 'custom', path: ['TENANTS_FILE'], message: 'Set TENANTS_FILE or TENANTS_JSON' });
     }

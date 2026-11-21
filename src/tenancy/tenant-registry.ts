@@ -1,12 +1,13 @@
 import { sha256 } from '../lib/crypto.js';
+import type { StorageProvider, TenantStore } from '../persistence/types.js';
 import type { TenantConfig } from './tenant.js';
-import type { TenantModelFactory, TenantModels } from './tenant-models.js';
 
 /** Everything a request needs to know about the tenant it belongs to. */
 export interface TenantContext {
   id: string;
   config: TenantConfig;
-  models: TenantModels;
+  /** Repositories bound to this tenant's own collections / tables. */
+  store: TenantStore;
 }
 
 /** In-memory index of the configured tenants, looked up by API key hash. */
@@ -16,7 +17,7 @@ export class TenantRegistry {
 
   constructor(
     tenants: readonly TenantConfig[],
-    private readonly models: TenantModelFactory,
+    private readonly storage: StorageProvider,
   ) {
     for (const tenant of tenants) {
       this.byId.set(tenant.id, tenant);
@@ -43,6 +44,6 @@ export class TenantRegistry {
   }
 
   async context(config: TenantConfig): Promise<TenantContext> {
-    return { id: config.id, config, models: await this.models.get(config.id) };
+    return { id: config.id, config, store: await this.storage.forTenant(config.id) };
   }
 }

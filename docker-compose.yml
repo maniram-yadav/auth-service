@@ -1,7 +1,12 @@
-# Local stack: MongoDB + auth-service.  Usage: cp .env.example .env && docker compose up --build
+# Local stack. Pick the database with DB_DRIVER in .env and the matching profile:
+#
+#   cp .env.example .env && cp tenants.example.json tenants.json
+#   DB_DRIVER=mongodb   ->  docker compose --profile mongodb up --build
+#   DB_DRIVER=postgres  ->  docker compose --profile postgres up --build
 services:
   mongo:
     image: mongo:8
+    profiles: [mongodb]
     restart: unless-stopped
     volumes:
       - mongo-data:/data/db
@@ -10,13 +15,30 @@ services:
       interval: 10s
       retries: 5
 
+  postgres:
+    image: postgres:17
+    profiles: [postgres]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: auth_service
+      POSTGRES_USER: auth_service
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-local-only}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth_service -d auth_service"]
+      interval: 10s
+      retries: 5
+
   auth-service:
     build: .
+    profiles: [mongodb, postgres]
     restart: unless-stopped
     env_file: .env
     environment:
-      MONGODB_URI: mongodb://mongo:27017/auth_service
       NODE_ENV: ${NODE_ENV:-development}
+      MONGODB_URI: mongodb://mongo:27017/auth_service
+      DATABASE_URL: postgres://auth_service:${POSTGRES_PASSWORD:-change-me-local-only}@postgres:5432/auth_service
       TENANTS_FILE: /app/config/tenants.json
     volumes:
       - ./tenants.json:/app/config/tenants.json:ro
@@ -25,6 +47,11 @@ services:
     depends_on:
       mongo:
         condition: service_healthy
+        required: false
+      postgres:
+        condition: service_healthy
+        required: false
 
 volumes:
   mongo-data:
+  pg-data:

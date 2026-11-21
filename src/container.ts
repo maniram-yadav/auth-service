@@ -7,8 +7,9 @@ import { TokenService } from './modules/auth/token.service.js';
 import { ConsoleMailer, MemoryMailer } from './modules/mail/dev.mailers.js';
 import { GmailMailer } from './modules/mail/gmail.mailer.js';
 import type { Mailer } from './modules/mail/mailer.js';
+import { createStorage } from './persistence/index.js';
+import type { StorageProvider } from './persistence/types.js';
 import { loadTenantConfigs, type TenantConfig } from './tenancy/tenant.js';
-import { TenantModelFactory } from './tenancy/tenant-models.js';
 import { TenantRegistry } from './tenancy/tenant-registry.js';
 
 export interface Container {
@@ -18,6 +19,7 @@ export interface Container {
   tokens: TokenService;
   auth: AuthService;
   tenants: TenantRegistry;
+  storage: StorageProvider;
 }
 
 export function createMailer(env: Env, logger: Logger): Mailer {
@@ -41,12 +43,13 @@ export function createMailer(env: Env, logger: Logger): Mailer {
 export function createContainer(
   env: Env,
   logger: Logger,
-  overrides: { mailer?: Mailer; tenantConfigs?: TenantConfig[] } = {},
+  overrides: { mailer?: Mailer; tenantConfigs?: TenantConfig[]; storage?: StorageProvider } = {},
 ): Container {
   const mailer = overrides.mailer ?? createMailer(env, logger);
+  const storage = overrides.storage ?? createStorage(env, logger);
   const tenantConfigs = overrides.tenantConfigs ?? loadTenantConfigs(env);
-  const tenants = new TenantRegistry(tenantConfigs, new TenantModelFactory(env.TENANT_ISOLATION, env.TENANT_DB_PREFIX));
+  const tenants = new TenantRegistry(tenantConfigs, storage);
   const tokens = new TokenService(env);
   const auth = new AuthService({ config: env, passwords: new PasswordService(), tokens, mailer, logger });
-  return { env, logger, mailer, tokens, auth, tenants };
+  return { env, logger, mailer, tokens, auth, tenants, storage };
 }
