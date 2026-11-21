@@ -17,6 +17,9 @@ services:
     environment:
       MONGODB_URI: mongodb://mongo:27017/auth_service
       NODE_ENV: ${NODE_ENV:-development}
+      TENANTS_FILE: /app/config/tenants.json
+    volumes:
+      - ./tenants.json:/app/config/tenants.json:ro
     ports:
       - "4000:4000"
     depends_on:

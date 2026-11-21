@@ -1,10 +1,9 @@
 import argon2 from 'argon2';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { UserModel } from '../src/modules/users/user.model.js';
 import { buildApp, clearDb, connectTestDb, disconnectTestDb, resetCodeFrom, validUser } from './helpers.js';
 
-const { api, mailer } = buildApp();
+const { api, mailer, tenantModels } = buildApp();
 
 beforeAll(() => connectTestDb('auth_tests'));
 afterAll(() => disconnectTestDb());
@@ -21,6 +20,7 @@ describe('POST /register', () => {
     const res = await register();
     expect(res.status).toBe(201);
     expect(res.body.user).toMatchObject({
+      tenant: 'mobile_app',
       fullName: 'Jane Doe',
       email: 'jane.doe@example.com',
       country: 'US',
@@ -33,7 +33,8 @@ describe('POST /register', () => {
 
   it('stores the password as an Argon2id hash, never in plain text', async () => {
     await register();
-    const stored = await UserModel.findOne({ email: 'jane.doe@example.com' }).select('+passwordHash').lean();
+    const { users } = await tenantModels('mobile_app');
+    const stored = await users.findOne({ email: 'jane.doe@example.com' }).select('+passwordHash').lean();
     expect(stored!.passwordHash).toMatch(/^\$argon2id\$/);
     expect(stored!.passwordHash).not.toContain(validUser.password);
     expect(await argon2.verify(stored!.passwordHash, validUser.password)).toBe(true);
@@ -255,8 +256,8 @@ describe('forgot / reset password', () => {
   it('stores only an HMAC of the code', async () => {
     await api.post('/api/v1/auth/forgot-password').send({ email: validUser.email });
     const code = resetCodeFrom(mailer, 'jane.doe@example.com');
-    const { PasswordResetModel } = await import('../src/modules/auth/models/password-reset.model.js');
-    const record = await PasswordResetModel.findOne().lean();
+    const { passwordResets } = await tenantModels('mobile_app');
+    const record = await passwordResets.findOne().lean();
     expect(record!.codeHash).not.toContain(code);
     expect(record!.codeHash).toMatch(/^[a-f0-9]{64}$/);
   });

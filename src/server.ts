@@ -10,6 +10,12 @@ async function main() {
   const container = createContainer(env, logger);
 
   await connectMongo(env.MONGODB_URI, logger);
+  // Create every tenant's collections and indexes up front (they are otherwise created lazily).
+  await Promise.all(container.tenants.list().map((t) => container.tenants.context(t)));
+  logger.info(
+    { tenants: container.tenants.list().map((t) => t.id), isolation: env.TENANT_ISOLATION },
+    'tenants ready',
+  );
   container.mailer.verify().then(
     () => logger.info({ transport: env.MAIL_TRANSPORT }, 'mail transport ready'),
     (err: unknown) => logger.error({ err }, 'mail transport verification failed — reset emails will not be delivered'),

@@ -1,0 +1,18 @@
+{
+  "tenants": [
+    {
+      "id": "callblocker_android",
+      "name": "Call Blocker Android app",
+      "apiKeyHashes": ["replace-with-output-of-npm-run-tenant-key-0000000000000000000000"],
+      "allowedOrigins": [],
+      "mail": { "appName": "Call Blocker" }
+    },
+    {
+      "id": "marketing_web",
+      "name": "Marketing website",
+      "apiKeyHashes": ["replace-with-output-of-npm-run-tenant-key-1111111111111111111111"],
+      "allowedOrigins": ["https://www.example.com", "https://example.com"],
+      "mail": { "appName": "Example", "from": "Example <no-reply@example.com>" }
+    }
+  ]
+}

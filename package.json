@@ -9,7 +9,9 @@
     "start": "node --env-file-if-exists=.env dist/server.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "tenant:key": "tsx scripts/create-tenant-key.ts",
+    "tenant:migrate": "tsx --env-file-if-exists=.env scripts/migrate-legacy-to-tenant.ts"
   },
   "dependencies": {
     "argon2": "^0.45.2",

@@ -4,10 +4,9 @@ import { ipKeyGenerator, rateLimit, type Options } from 'express-rate-limit';
 import type { ZodType } from 'zod';
 
 import type { Env } from '../config/env.js';
-import { safeEqual } from '../lib/crypto.js';
 import { AppError } from '../lib/errors.js';
-import { UserModel } from '../modules/users/user.model.js';
 import type { TokenService } from '../modules/auth/token.service.js';
+import type { TenantRegistry } from '../tenancy/tenant-registry.js';
 
 /** Replaces req.body with the parsed (trimmed, normalized, unknown-keys-rejected) value. */
 export const validateBody =
@@ -35,8 +34,11 @@ export const requireAuth =
     if (scheme?.toLowerCase() !== 'bearer' || !token) {
       throw AppError.unauthorized('Missing bearer token');
     }
-    const claims = tokens.verifyAccessToken(token);
-    const user = await UserModel.findById(claims.sub, { tokenVersion: 1 }).lean();
+    const tenant = req.tenant;
+    if (!tenant) throw AppError.unauthorized('Unknown tenant');
+    // The token must have been issued for this tenant, and the user must exist in its collection.
+    const claims = tokens.verifyAccessToken(token, tenant.id);
+    const user = await tenant.models.users.findById(claims.sub, { tokenVersion: 1 }).lean();
     if (!user || user.tokenVersion !== claims.tv) {
       throw AppError.unauthorized('Session is no longer valid', 'INVALID_TOKEN');
     }
@@ -44,16 +46,34 @@ export const requireAuth =
     next();
   };
 
-/** Service-to-service protection: when API keys are configured every request must present one. */
-export const requireApiKey =
-  (keys: readonly string[]): RequestHandler =>
-  (req, _res, next) => {
-    if (keys.length === 0) return next();
-    const presented = req.get('x-api-key');
-    if (!presented || !keys.some((k) => safeEqual(k, presented))) {
-      next(new AppError(401, 'UNAUTHORIZED', 'Invalid or missing API key'));
-      return;
+export const TENANT_HEADER = 'x-tenant-id';
+export const API_KEY_HEADER = 'x-api-key';
+
+/**
+ * Identifies the tenant (app / website) of every /api request from its API key.
+ * - The key is the source of truth; an optional X-Tenant-Id must agree with it.
+ * - Browser requests must come from one of the tenant's own allowed origins.
+ * - Disabled tenants are rejected.
+ */
+export const resolveTenant =
+  (registry: TenantRegistry): RequestHandler =>
+  async (req, _res, next) => {
+    const apiKey = req.get(API_KEY_HEADER);
+    const config = apiKey ? registry.findByApiKey(apiKey) : undefined;
+    if (!config) throw new AppError(401, 'UNAUTHORIZED', 'Invalid or missing API key');
+
+    const claimed = req.get(TENANT_HEADER);
+    if (claimed !== undefined && claimed !== config.id) {
+      throw AppError.forbidden('X-Tenant-Id does not match the API key');
     }
+    if (!config.enabled) throw AppError.forbidden('This application is disabled');
+
+    const origin = req.get('origin');
+    if (origin && !config.allowedOrigins.includes(origin)) {
+      throw AppError.forbidden('Origin is not allowed for this application');
+    }
+
+    req.tenant = await registry.context(config);
     next();
   };
 
@@ -82,7 +102,7 @@ export function corsPolicy(origins: readonly string[]): RequestHandler {
       callback(null, false);
     },
     methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Request-Id'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Tenant-Id', 'X-Request-Id'],
     credentials: false,
     maxAge: 600,
   });
@@ -99,7 +119,10 @@ export interface RateLimiters {
 
 const clientIp = (req: Request) => ipKeyGenerator(req.ip ?? '0.0.0.0');
 
-/** Per-IP limits plus per-account limits on credential endpoints (stops distributed guessing per user). */
+/**
+ * Per-IP limits plus per-tenant + per-account limits on credential endpoints (stops distributed
+ * guessing per user, and one tenant's traffic can't exhaust another tenant's budget).
+ */
 export function createRateLimiters(env: Pick<Env, 'RATE_LIMIT_ENABLED'>): RateLimiters {
   const make = (windowMinutes: number, limit: number, extra: Partial<Options> = {}): RequestHandler =>
     rateLimit({
@@ -118,12 +141,15 @@ export function createRateLimiters(env: Pick<Env, 'RATE_LIMIT_ENABLED'>): RateLi
     return id.trim().toLowerCase().replace(/[^\w@.+]/g, '');
   };
 
+  const perTenantIp = (req: Request) => `${req.tenant?.id ?? '-'}|${clientIp(req)}`;
+  const perAccount = (req: Request) => `${perTenantIp(req)}|${identifier(req)}`;
+
   return {
     global: make(15, 300),
-    register: make(60, 10),
-    login: make(15, 20, { keyGenerator: (req) => `${clientIp(req)}|${identifier(req)}` }),
-    refresh: make(15, 60),
-    forgotPassword: make(60, 5, { keyGenerator: (req) => `${clientIp(req)}|${identifier(req)}` }),
-    resetPassword: make(15, 10, { keyGenerator: (req) => `${clientIp(req)}|${identifier(req)}` }),
+    register: make(60, 10, { keyGenerator: perTenantIp }),
+    login: make(15, 20, { keyGenerator: perAccount }),
+    refresh: make(15, 60, { keyGenerator: perTenantIp }),
+    forgotPassword: make(60, 5, { keyGenerator: perAccount }),
+    resetPassword: make(15, 10, { keyGenerator: perAccount }),
   };
 }

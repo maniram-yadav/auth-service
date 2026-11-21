@@ -38,10 +38,17 @@ const EnvSchema = z
     LOGIN_MAX_FAILED_ATTEMPTS: z.coerce.number().int().min(3).max(20).default(5),
     LOGIN_LOCK_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
 
-    /** Comma-separated browser origins allowed by CORS. Empty = no browser origins. */
+    /** Extra browser origins allowed by CORS (tenant allowedOrigins are added automatically). */
     CORS_ORIGINS: csv,
-    /** Comma-separated API keys. When set, every /api request must send `x-api-key`. */
-    API_KEYS: csv,
+
+    /** Path to tenants.json (see tenants.example.json). Ignored when TENANTS_JSON is set. */
+    TENANTS_FILE: z.string().optional(),
+    /** Inline tenants JSON — handy for containers / secret managers. */
+    TENANTS_JSON: z.string().optional(),
+    /** "collection": <tenant>_users etc. in one database. "database": one database per tenant. */
+    TENANT_ISOLATION: z.enum(['collection', 'database']).default('collection'),
+    /** Database name prefix for TENANT_ISOLATION=database, e.g. "auth_" → auth_web_shop. */
+    TENANT_DB_PREFIX: z.string().regex(/^[a-z0-9_]{0,20}$/).default('auth_'),
     /** Express "trust proxy" setting: number of hops in front of the service (0 = none). */
     TRUST_PROXY: z.coerce.number().int().min(0).max(10).default(0),
     RATE_LIMIT_ENABLED: bool.default(true),
@@ -55,6 +62,9 @@ const EnvSchema = z
     GOOGLE_REFRESH_TOKEN: z.string().optional(),
   })
   .superRefine((env, ctx) => {
+    if (!env.TENANTS_FILE && !env.TENANTS_JSON) {
+      ctx.addIssue({ code: 'custom', path: ['TENANTS_FILE'], message: 'Set TENANTS_FILE or TENANTS_JSON' });
+    }
     if (env.MAIL_TRANSPORT === 'gmail') {
       for (const key of ['GMAIL_USER', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN'] as const) {
         if (!env[key]) ctx.addIssue({ code: 'custom', path: [key], message: `${key} is required when MAIL_TRANSPORT=gmail` });

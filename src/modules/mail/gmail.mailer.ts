@@ -36,7 +36,8 @@ export class GmailMailer implements Mailer {
   }
 
   async send(message: MailMessage): Promise<void> {
-    await this.transporter.sendMail({ from: this.from, ...message });
+    const { from, ...rest } = message;
+    await this.transporter.sendMail({ ...rest, from: from ?? this.from });
   }
 
   async verify(): Promise<void> {

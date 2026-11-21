@@ -8,8 +8,8 @@ afterAll(() => disconnectTestDb());
 
 describe('API security', () => {
   it('sets security headers and hides the framework', async () => {
-    const { api } = buildApp();
-    const res = await api.get('/health/live');
+    const { raw } = buildApp();
+    const res = await raw.get('/health/live');
     expect(res.headers['x-powered-by']).toBeUndefined();
     expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect(res.headers['strict-transport-security']).toBeDefined();
@@ -22,20 +22,13 @@ describe('API security', () => {
     expect(res.headers['cache-control']).toBe('no-store');
   });
 
-  it('requires an API key when API_KEYS is configured', async () => {
-    const { api } = buildApp({ API_KEYS: 'key-one,key-two' });
-    expect((await api.post('/api/v1/auth/login').send({ email: 'a@b.com', password: 'x' })).status).toBe(401);
-    const withKey = await api.post('/api/v1/auth/login').set('X-API-Key', 'key-two').send({ email: 'a@b.com', password: 'whatever1' });
-    expect(withKey.status).toBe(401); // passes the key gate, then fails on credentials
-    expect(withKey.body.error.code).toBe('INVALID_CREDENTIALS');
-    expect((await api.get('/health/live')).status).toBe(200);
-  });
-
-  it('only allows configured CORS origins', async () => {
-    const { api } = buildApp({ CORS_ORIGINS: 'https://app.example.com' });
-    const allowed = await api.get('/health/live').set('Origin', 'https://app.example.com');
-    const denied = await api.get('/health/live').set('Origin', 'https://evil.example.com');
+  it('only allows configured CORS origins (env + tenant origins)', async () => {
+    const { raw } = buildApp({ CORS_ORIGINS: 'https://app.example.com' });
+    const allowed = await raw.get('/health/live').set('Origin', 'https://app.example.com');
+    const tenantOrigin = await raw.get('/health/live').set('Origin', 'https://portal.example.com');
+    const denied = await raw.get('/health/live').set('Origin', 'https://evil.example.com');
     expect(allowed.headers['access-control-allow-origin']).toBe('https://app.example.com');
+    expect(tenantOrigin.headers['access-control-allow-origin']).toBe('https://portal.example.com');
     expect(denied.headers['access-control-allow-origin']).toBeUndefined();
   });
 
@@ -65,5 +58,6 @@ describe('API security', () => {
     expect(() => loadEnv({ ...process.env, JWT_ACCESS_SECRET: 'short' })).toThrow(/JWT_ACCESS_SECRET/);
     expect(() => loadEnv({ ...process.env, MAIL_TRANSPORT: 'gmail', GMAIL_USER: undefined })).toThrow(/GMAIL_USER/);
     expect(() => loadEnv({ ...process.env, NODE_ENV: 'production', MAIL_TRANSPORT: 'console' })).toThrow(/MAIL_TRANSPORT/);
+    expect(() => loadEnv({ ...process.env, TENANTS_JSON: undefined, TENANTS_FILE: undefined })).toThrow(/TENANTS_FILE/);
   });
 });

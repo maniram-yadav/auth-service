@@ -3,6 +3,8 @@ export interface MailMessage {
   subject: string;
   text: string;
   html: string;
+  /** Overrides the default sender (per-tenant branding). */
+  from?: string;
 }
 
 /** Port for sending email. Implementations: Gmail (OAuth2), console (dev), memory (tests). */

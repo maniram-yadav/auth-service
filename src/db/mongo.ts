@@ -9,7 +9,6 @@ export async function connectMongo(uri: string, logger: Logger): Promise<typeof 
   mongoose.connection.on('disconnected', () => logger.warn('MongoDB disconnected'));
   mongoose.connection.on('reconnected', () => logger.info('MongoDB reconnected'));
   const connection = await mongoose.connect(uri, { serverSelectionTimeoutMS: 10_000, autoIndex: true });
-  await mongoose.connection.syncIndexes();
   logger.info('MongoDB connected');
   return connection;
 }

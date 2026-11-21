@@ -4,15 +4,21 @@ User registration, login (email **or** phone + password) and password reset by e
 Built with Node.js, Express 5, TypeScript, MongoDB (Mongoose) and Gmail sending via OAuth2.
 Backend only; it runs as a separate service next to the Call Blocker app.
 
+**Multi-tenant:** every app or website is a tenant identified by its API key. Each tenant's users, sessions and
+reset codes live in their own collections (`<tenant>_users`, …) or, optionally, their own database.
+Full design, security analysis and runbooks: [docs/MULTI_TENANCY.md](docs/MULTI_TENANCY.md).
+
 ## Quick start
 
 ```bash
 cp .env.example .env              # set the two secrets; MAIL_TRANSPORT=console prints codes to the log
+cp tenants.example.json tenants.json
+npm run tenant:key -- callblocker_android   # put the printed hash in tenants.json, give the key to the app
 npm install
 npm run dev                       # needs MongoDB at MONGODB_URI
 # or the full stack:
 docker compose up --build
-npm test                          # 34 end-to-end tests against a real in-memory MongoDB
+npm test                          # 47 end-to-end tests against a real in-memory MongoDB
 npm run build && npm start        # production build
 ```
 
@@ -20,7 +26,8 @@ npm run build && npm start        # production build
 
 All requests and responses are JSON. Errors always look like:
 `{ "error": { "code", "message", "details"?: [{ "field", "message" }], "requestId" } }`.
-If `API_KEYS` is set, every `/api` call needs the header `X-API-Key`.
+Every `/api` call needs the tenant's **`X-API-Key`** header (optionally `X-Tenant-Id`, which must match).
+An unknown key returns `401`. A tenant mismatch, a disabled tenant, or a browser origin not allowed for the tenant returns `403`.
 
 | Method | Path | Body | Success |
 |---|---|---|---|
@@ -100,6 +107,9 @@ registered · `413` body too large · `415` not JSON · `423` account locked · 
 - **Operations**: configuration is validated at startup (weak or missing secrets refuse to boot;
   production requires Gmail), logs redact passwords, tokens and codes, there are health checks, and
   shutdown is graceful. The Docker image runs as a non-root user.
+- **Tenant isolation**: the tenant is resolved from the hashed API key (never from client claims).
+  There are no global models; every query uses the tenant's own collections. JWTs are bound to the
+  tenant (`tid` + audience), reset codes are tenant-scoped, and browser origins are allow-listed per tenant.
 
 ## Structure
 
@@ -111,6 +121,9 @@ src/container.ts                   composition root (swap mailer etc.)
 src/middleware/                    validation, auth, API key, rate limits, error handler
 src/modules/auth/                  schemas, AuthService (use-cases), TokenService, PasswordService, models
 src/modules/mail/                  Mailer port, GmailMailer (OAuth2), console/memory mailers, templates
-src/modules/users/user.model.ts    User schema
+src/modules/users/user.model.ts    User schema (bound per tenant)
+src/tenancy/                       tenant config loader, registry (API key → tenant), per-tenant model factory
+scripts/                           tenant:key (onboarding), tenant:migrate (legacy data → tenant)
+docs/MULTI_TENANCY.md              multi-tenancy design & implementation plan
 tests/                             supertest + mongodb-memory-server end-to-end tests
 ```

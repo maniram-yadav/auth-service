@@ -7,21 +7,23 @@ import { pinoHttp } from 'pino-http';
 import type { Env } from './config/env.js';
 import { uuid } from './lib/crypto.js';
 import { errorHandler, notFound } from './middleware/errors.js';
-import { corsPolicy, createRateLimiters, noStore, requireApiKey, requireJsonBody } from './middleware/security.js';
+import { corsPolicy, createRateLimiters, noStore, requireJsonBody, resolveTenant } from './middleware/security.js';
 import { createAuthRouter } from './modules/auth/auth.routes.js';
 import type { AuthService } from './modules/auth/auth.service.js';
 import type { TokenService } from './modules/auth/token.service.js';
+import type { TenantRegistry } from './tenancy/tenant-registry.js';
 
 export interface AppDeps {
   env: Env;
   logger: Logger;
   auth: AuthService;
   tokens: TokenService;
+  tenants: TenantRegistry;
 }
 
 const REQUEST_ID = /^[\w-]{8,64}$/;
 
-export function createApp({ env, logger, auth, tokens }: AppDeps): Express {
+export function createApp({ env, logger, auth, tokens, tenants }: AppDeps): Express {
   const app = express();
   const limits = createRateLimiters(env);
 
@@ -42,10 +44,10 @@ export function createApp({ env, logger, auth, tokens }: AppDeps): Express {
     }),
   );
   app.use(helmet());
-  app.use(corsPolicy(env.CORS_ORIGINS));
+  app.use(corsPolicy([...env.CORS_ORIGINS, ...tenants.allowedOrigins()]));
   app.use(limits.global);
 
-  // Health checks stay outside the API-key gate so orchestrators can probe them.
+  // Health checks stay outside the tenant/API-key gate so orchestrators can probe them.
   app.get('/health/live', (_req, res) => {
     res.json({ status: 'ok' });
   });
@@ -54,7 +56,8 @@ export function createApp({ env, logger, auth, tokens }: AppDeps): Express {
     res.status(ready ? 200 : 503).json({ status: ready ? 'ok' : 'unavailable', database: ready ? 'up' : 'down' });
   });
 
-  app.use('/api', requireApiKey(env.API_KEYS), noStore, requireJsonBody, express.json({ limit: '10kb', strict: true }));
+  // Tenant first: unknown clients are rejected before their body is even parsed.
+  app.use('/api', noStore, resolveTenant(tenants), requireJsonBody, express.json({ limit: '10kb', strict: true }));
   app.use('/api/v1/auth', createAuthRouter(auth, tokens, limits));
 
   app.use(notFound);

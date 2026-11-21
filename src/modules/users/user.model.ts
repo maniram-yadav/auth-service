@@ -1,4 +1,4 @@
-import { Schema, model, type HydratedDocument, type Model, type Types } from 'mongoose';
+import { Schema, type HydratedDocument, type Types } from 'mongoose';
 
 export interface User {
   fullName: string;
@@ -25,6 +25,8 @@ export type UserDocument = HydratedDocument<User>;
 /** Shape returned by the API — no secrets or security counters. */
 export interface PublicUser {
   id: string;
+  /** Tenant (app / website) the account belongs to. */
+  tenant: string;
   fullName: string;
   email: string;
   country: string;
@@ -33,7 +35,8 @@ export interface PublicUser {
   updatedAt: string;
 }
 
-const userSchema = new Schema<User>(
+/** Bound to a per-tenant collection by TenantModelFactory — there is no global User model. */
+export const userSchema = new Schema<User>(
   {
     fullName: { type: String, required: true, trim: true, maxlength: 100 },
     email: { type: String, required: true, trim: true, lowercase: true, maxlength: 254 },
@@ -61,11 +64,13 @@ const userSchema = new Schema<User>(
 userSchema.index({ email: 1 }, { unique: true });
 userSchema.index({ phone: 1 }, { unique: true });
 
-export const UserModel: Model<User> = model<User>('User', userSchema);
-
-export function toPublicUser(user: Pick<User, 'fullName' | 'email' | 'country' | 'phone' | 'createdAt' | 'updatedAt'> & { _id: Types.ObjectId }): PublicUser {
+export function toPublicUser(
+  tenant: string,
+  user: Pick<User, 'fullName' | 'email' | 'country' | 'phone' | 'createdAt' | 'updatedAt'> & { _id: Types.ObjectId },
+): PublicUser {
   return {
     id: user._id.toString(),
+    tenant,
     fullName: user.fullName,
     email: user.email,
     country: user.country,
