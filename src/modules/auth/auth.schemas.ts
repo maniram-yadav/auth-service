@@ -17,7 +17,8 @@ const password = (label = 'Password') =>
     .string({ error: `${label} is required` })
     .min(PASSWORD_MIN_LENGTH, `${label} must be at least ${PASSWORD_MIN_LENGTH} characters long`)
     .max(PASSWORD_MAX_LENGTH, `${label} must be at most ${PASSWORD_MAX_LENGTH} characters long`)
-    .refine((v) => v.trim().length >= PASSWORD_MIN_LENGTH, {
+    // Only reported when the length rule passed, so users see one clear message at a time.
+    .refine((v) => v.length < PASSWORD_MIN_LENGTH || v.trim().length >= PASSWORD_MIN_LENGTH, {
       error: `${label} must contain at least ${PASSWORD_MIN_LENGTH} non-space characters`,
     });
 

@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import type { Types } from 'mongoose';
+import mongoose, { type Types } from 'mongoose';
 
 import type { Env } from '../../config/env.js';
 import { randomToken, sha256, uuid } from '../../lib/crypto.js';
@@ -92,8 +92,9 @@ export class TokenService {
     const tokenHash = sha256(refreshToken);
     const now = new Date();
     // Atomically mark as used so two concurrent refreshes cannot both succeed.
+    // mongoose.trusted(): our own operator, exempt from the global sanitizeFilter.
     const record = await RefreshTokenModel.findOneAndUpdate(
-      { tokenHash, revokedAt: null, expiresAt: { $gt: now } },
+      { tokenHash, revokedAt: null, expiresAt: mongoose.trusted({ $gt: now }) },
       { $set: { revokedAt: now } },
       { returnDocument: 'before' },
     );
